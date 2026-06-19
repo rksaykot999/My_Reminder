@@ -290,7 +290,20 @@ fun MainContainer() {
                             dataManager.saveReminders(reminders)
                         }
                     )
-                    NavItem.CALENDAR -> UniversalCalendar(reminders = reminders)
+                    NavItem.CALENDAR -> UniversalCalendar(
+                        reminders = reminders,
+                        onQuickAdd = { dateStr, title ->
+                            val newRem = Reminder(
+                                id = (reminders.maxOfOrNull { it.id } ?: 0) + 1,
+                                title = title,
+                                time = "09:00 AM",
+                                date = dateStr,
+                                scheduledTimestamp = System.currentTimeMillis() + 3600000 // Placeholder
+                            )
+                            reminders.add(newRem)
+                            dataManager.saveReminders(reminders)
+                        }
+                    )
                     NavItem.NOTES -> GeneralNotes(
                         notes = notes,
                         onAddNote = { isAddingNote = true }
@@ -519,7 +532,10 @@ fun NewReminderScreen(initialReminder: Reminder? = null, onDismiss: () -> Unit, 
         selectedTime = String.format(Locale.getDefault(), "%02d:%02d %s", h, min, amPm)
     }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), false)
 
-    Surface(modifier = Modifier.fillMaxSize(), color = BgColor) {
+    Surface(
+        modifier = Modifier.fillMaxSize().imePadding(), // SMART FIX: Respects keyboard
+        color = BgColor
+    ) {
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
             Spacer(modifier = Modifier.height(64.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -635,8 +651,9 @@ fun ScheduleCard(label: String, value: String, icon: ImageVector, modifier: Modi
 }
 
 @Composable
-fun UniversalCalendar(reminders: List<Reminder>) {
+fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) -> Unit) {
     var selectedDay by remember { mutableIntStateOf(15) } // Default to Oct 15
+    var showDayDetail by remember { mutableStateOf(false) }
     var quickNote by remember { mutableStateOf("") }
     
     val filteredReminders = reminders.filter { 
@@ -702,7 +719,10 @@ fun UniversalCalendar(reminders: List<Reminder>) {
                                             .aspectRatio(1f)
                                             .clip(CircleShape)
                                             .background(if (isSelected) PrimaryIndigo else Color.Transparent)
-                                            .clickable { selectedDay = dayNum },
+                                            .clickable { 
+                                                selectedDay = dayNum
+                                                showDayDetail = true
+                                            },
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
@@ -721,13 +741,65 @@ fun UniversalCalendar(reminders: List<Reminder>) {
                 }
             }
 
-            item { Spacer(modifier = Modifier.height(24.dp)) }
+            item { Spacer(modifier = Modifier.height(32.dp)) }
 
-            // --- SAMSUNG STYLE DAY VIEW ---
+            // --- BOTTOM LIST (READ-ONLY) ---
             item {
+                Text(
+                    text = "Reminders for $selectedDay Oct",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            }
+
+            item { Spacer(modifier = Modifier.height(16.dp)) }
+
+            if (filteredReminders.isEmpty()) {
+                item {
+                    Text(
+                        "No events scheduled", 
+                        color = TextSecondary, 
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp), 
+                        textAlign = TextAlign.Center
+                    )
+                }
+            } else {
+                items(filteredReminders) { reminder ->
+                    DayEventItem(
+                        time = reminder.time.split(":")[0],
+                        title = reminder.title,
+                        duration = reminder.time,
+                        color = reminder.category.color,
+                        icon = reminder.category.icon
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+            }
+            
+            item { Spacer(modifier = Modifier.height(120.dp)) }
+        }
+
+        // --- SAMSUNG STYLE DAY VIEW POPUP ---
+        AnimatedVisibility(
+            visible = showDayDetail,
+            enter = fadeIn() + scaleIn(initialScale = 0.9f),
+            exit = fadeOut() + scaleOut(targetScale = 0.9f)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .clickable { showDayDetail = false }
+                    .imePadding(), // SMART FIX: Pushes UI up when keyboard appears
+                contentAlignment = Alignment.Center
+            ) {
                 Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp, bottomStart = 32.dp, bottomEnd = 32.dp),
+                    modifier = Modifier
+                        .fillMaxWidth(0.9f)
+                        .wrapContentHeight()
+                        .clickable(enabled = false) {}, // Prevent click propagation to background
+                    shape = RoundedCornerShape(32.dp),
                     color = SurfaceColor,
                     border = BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
                 ) {
@@ -757,18 +829,21 @@ fun UniversalCalendar(reminders: List<Reminder>) {
                         Spacer(modifier = Modifier.height(24.dp))
 
                         // Dynamic Event Items
-                        if (filteredReminders.isEmpty()) {
-                            Text("No events scheduled", color = TextSecondary, modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp), textAlign = TextAlign.Center)
-                        } else {
-                            filteredReminders.forEach { reminder ->
-                                DayEventItem(
-                                    time = reminder.time.split(":")[0],
-                                    title = reminder.title,
-                                    duration = reminder.time,
-                                    color = reminder.category.color,
-                                    icon = reminder.category.icon
-                                )
-                                Spacer(modifier = Modifier.height(20.dp))
+                        Box(modifier = Modifier.heightIn(max = 300.dp)) {
+                            if (filteredReminders.isEmpty()) {
+                                Text("No events scheduled", color = TextSecondary, modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp), textAlign = TextAlign.Center)
+                            } else {
+                                LazyColumn(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                                    items(filteredReminders) { reminder ->
+                                        DayEventItem(
+                                            time = reminder.time.split(":")[0],
+                                            title = reminder.title,
+                                            duration = reminder.time,
+                                            color = reminder.category.color,
+                                            icon = reminder.category.icon
+                                        )
+                                    }
+                                }
                             }
                         }
 
@@ -797,7 +872,13 @@ fun UniversalCalendar(reminders: List<Reminder>) {
                                 modifier = Modifier.size(40.dp),
                                 shape = CircleShape,
                                 color = SurfaceColor,
-                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f))
+                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
+                                onClick = {
+                                    if (quickNote.isNotBlank()) {
+                                        onQuickAdd("Oct $selectedDay", quickNote)
+                                        quickNote = ""
+                                    }
+                                }
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(Icons.Rounded.Add, null, tint = TextPrimary, modifier = Modifier.size(20.dp))
@@ -807,8 +888,6 @@ fun UniversalCalendar(reminders: List<Reminder>) {
                     }
                 }
             }
-            
-            item { Spacer(modifier = Modifier.height(120.dp)) }
         }
     }
 }
@@ -1008,7 +1087,10 @@ fun UniversalProfile(name: String, bio: String, onUpdateProfile: (String, String
             item { Spacer(modifier = Modifier.height(110.dp)) }
         }
         AnimatedVisibility(visible = isEditing, enter = slideInVertically(initialOffsetY = { it }) + fadeIn(), exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()) {
-            Surface(modifier = Modifier.fillMaxSize(), color = BgColor.copy(alpha = 0.98f)) {
+            Surface(
+                modifier = Modifier.fillMaxSize().imePadding(), // SMART FIX: Respects keyboard
+                color = BgColor.copy(alpha = 0.98f)
+            ) {
                 LazyColumn(modifier = Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     item { Spacer(modifier = Modifier.height(24.dp)) }
                     item { Text("Update Identity", style = MaterialTheme.typography.headlineMedium, color = TextPrimary, fontWeight = FontWeight.Bold) }
