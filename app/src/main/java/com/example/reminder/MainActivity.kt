@@ -185,6 +185,14 @@ class DataManager(context: Context) {
     }
 
     fun loadAccent(): Int = prefs.getInt("app_accent", Color(0xFF6366F1).toArgb())
+
+    fun saveNotificationEnabled(key: String, enabled: Boolean) {
+        prefs.edit { putBoolean(key, enabled) }
+    }
+
+    fun isNotificationEnabled(key: String, default: Boolean = true): Boolean {
+        return prefs.getBoolean(key, default)
+    }
 }
 
 private fun Color.toArgb(): Int {
@@ -195,37 +203,78 @@ private fun Color.toArgb(): Int {
 }
 
 class MainActivity : ComponentActivity() {
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        // Handle permission result if needed
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        createNotificationChannel()
+        createNotificationChannels()
+        checkNotificationPermission()
         enableEdgeToEdge()
         setContent {
             MainContainer()
         }
     }
 
-    private fun createNotificationChannel() {
+    private fun checkNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ActivityCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        // Also check for exact alarm permission on Android 12+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            if (!alarmManager.canScheduleExactAlarms()) {
+                try {
+                    val intent = Intent().apply {
+                        action = android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    // Fallback or ignore
+                }
+            }
+        }
+    }
+
+    private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
 
-            val completionChannel = NotificationChannel(
-                "TASK_COMPLETED",
-                "Completions",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Channel for task completion alerts"
-            }
+            val channels = listOf(
+                NotificationChannel(
+                    "TASK_COMPLETED",
+                    "Completions",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Channel for task completion alerts"
+                },
+                NotificationChannel(
+                    "TASK_REMINDER",
+                    "Reminders",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Channel for scheduled task reminders"
+                },
+                NotificationChannel(
+                    "PRODUCTIVITY_CHANNEL",
+                    "Productivity Tools",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Channel for timers and stopwatch"
+                }
+            )
 
-            val reminderChannel = NotificationChannel(
-                "TASK_REMINDER",
-                "Reminders",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Channel for scheduled task reminders"
-            }
-
-            notificationManager.createNotificationChannel(completionChannel)
-            notificationManager.createNotificationChannel(reminderChannel)
+            notificationManager.createNotificationChannels(channels)
         }
     }
 }
@@ -233,6 +282,9 @@ class MainActivity : ComponentActivity() {
 class ReminderReceiver : BroadcastReceiver() {
     @SuppressLint("MissingPermission")
     override fun onReceive(context: Context, intent: Intent) {
+        val dataManager = DataManager(context)
+        if (!dataManager.isNotificationEnabled("reminders_enabled")) return
+
         val action = intent.action
         if (action == "ACTION_DONE") {
             val id = intent.getIntExtra("id", -1)
@@ -260,7 +312,7 @@ class ReminderReceiver : BroadcastReceiver() {
         )
 
         val builder = NotificationCompat.Builder(context, "TASK_REMINDER")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_notification_clock)
             .setContentTitle(title)
             .setContentText(desc)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -294,7 +346,7 @@ fun markReminderAsDone(context: Context, id: Int) {
 @SuppressLint("MissingPermission", "PostNotifications")
 fun showCompletionNotification(context: Context, taskTitle: String) {
     val builder = NotificationCompat.Builder(context, "TASK_COMPLETED")
-        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setSmallIcon(R.drawable.ic_notification_clock)
         .setContentTitle("Task Finished!")
         .setContentText("You completed: $taskTitle")
         .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -612,19 +664,31 @@ fun GeneralHome(
         ) {
             item { Spacer(modifier = Modifier.height(72.dp)) }
             item {
-                Column {
-                    Text(
-                        "WELCOME BACK",
-                        color = LocalAccentColor.current,
-                        letterSpacing = 1.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        "Make it count.",
-                        color = LocalTextPrimary.current,
-                        style = MaterialTheme.typography.displaySmall,
-                        fontWeight = FontWeight.ExtraBold
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            "WELCOME BACK",
+                            color = LocalAccentColor.current,
+                            letterSpacing = 1.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                        Text(
+                            "Make it count.",
+                            color = LocalTextPrimary.current,
+                            style = MaterialTheme.typography.displaySmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                    Icon(
+                        painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_app_logo),
+                        contentDescription = "Logo",
+                        modifier = Modifier.size(56.dp),
+                        tint = Color.Unspecified
                     )
                 }
             }
@@ -755,7 +819,11 @@ fun TaskRow(reminder: Reminder, onToggle: () -> Unit, onEdit: () -> Unit, onDele
             Box(
                 modifier = Modifier
                     .size(24.dp)
-                    .border(2.dp, if (reminder.isCompleted) SuccessEmerald else LocalAccentColor.current, CircleShape)
+                    .border(
+                        2.dp,
+                        if (reminder.isCompleted) SuccessEmerald else LocalAccentColor.current,
+                        CircleShape
+                    )
                     .padding(4.dp)
             ) {
                 if (reminder.isCompleted) Icon(
@@ -1155,12 +1223,26 @@ fun ScheduleCard(
 
 @Composable
 fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) -> Unit) {
+    var calendarState by remember { 
+        mutableStateOf(Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1) }) 
+    }
     var selectedDay by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.DAY_OF_MONTH)) }
+
+    // Clamp selected day when month changes
+    LaunchedEffect(calendarState) {
+        val maxDays = calendarState.getActualMaximum(Calendar.DAY_OF_MONTH)
+        if (selectedDay > maxDays) {
+            selectedDay = maxDays
+        }
+    }
     var showDayDetail by remember { mutableStateOf(false) }
     var quickNote by remember { mutableStateOf("") }
 
-    val currentMonth = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Calendar.getInstance().time)
-    val monthShort = SimpleDateFormat("MMM", Locale.getDefault()).format(Calendar.getInstance().time)
+    val monthYearFormat = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
+    val monthShortFormat = SimpleDateFormat("MMM", Locale.getDefault())
+    
+    val currentMonthName = monthYearFormat.format(calendarState.time)
+    val monthShort = monthShortFormat.format(calendarState.time)
 
     val filteredReminders = reminders.filter {
         it.date.contains(selectedDay.toString()) && it.date.contains(monthShort)
@@ -1178,7 +1260,10 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(LocalSurfaceColor.current.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
+                        .background(
+                            LocalSurfaceColor.current.copy(alpha = 0.3f),
+                            RoundedCornerShape(24.dp)
+                        )
                         .padding(16.dp)
                 ) {
                     Row(
@@ -1187,20 +1272,28 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            currentMonth,
+                            currentMonthName,
                             color = LocalTextPrimary.current,
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 20.sp
                         )
                         Row {
-                            IconButton(onClick = {}) {
+                            IconButton(onClick = {
+                                val newCal = calendarState.clone() as Calendar
+                                newCal.add(Calendar.MONTH, -1)
+                                calendarState = newCal
+                            }) {
                                 Icon(
                                     Icons.Rounded.ChevronLeft,
                                     null,
                                     tint = LocalTextPrimary.current
                                 )
                             }
-                            IconButton(onClick = {}) {
+                            IconButton(onClick = {
+                                val newCal = calendarState.clone() as Calendar
+                                newCal.add(Calendar.MONTH, 1)
+                                calendarState = newCal
+                            }) {
                                 Icon(
                                     Icons.Rounded.ChevronRight,
                                     null,
@@ -1212,9 +1305,9 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    val days = listOf("M", "T", "W", "T", "F", "S", "S")
+                    val daysOfWeek = listOf("M", "T", "W", "T", "F", "S", "S")
                     Row(modifier = Modifier.fillMaxWidth()) {
-                        days.forEach { day ->
+                        daysOfWeek.forEach { day ->
                             Text(
                                 day,
                                 modifier = Modifier.weight(1f),
@@ -1228,25 +1321,39 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    val calendar = Calendar.getInstance()
-                    val daysInMonth = calendar.getActualMaximum(Calendar.DAY_OF_MONTH)
-
-                    for (row in 0 until 5) {
+                    // Correct calendar grid logic
+                    val daysInMonth = calendarState.getActualMaximum(Calendar.DAY_OF_MONTH)
+                    val firstDayOfWeek = (calendarState.get(Calendar.DAY_OF_WEEK) + 5) % 7 // Align M=0, T=1...
+                    
+                    val totalCells = ((daysInMonth + firstDayOfWeek + 6) / 7) * 7
+                    
+                    for (row in 0 until (totalCells / 7)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             for (col in 0 until 7) {
-                                val i = row * 7 + col
-                                if (i < daysInMonth) {
-                                    val dayNum = i + 1
+                                val cellIndex = row * 7 + col
+                                val dayNum = cellIndex - firstDayOfWeek + 1
+                                
+                                if (dayNum in 1..daysInMonth) {
                                     val isSelected = dayNum == selectedDay
+                                    val isToday = dayNum == Calendar.getInstance().get(Calendar.DAY_OF_MONTH) && 
+                                                 calendarState.get(Calendar.MONTH) == Calendar.getInstance().get(Calendar.MONTH) &&
+                                                 calendarState.get(Calendar.YEAR) == Calendar.getInstance().get(Calendar.YEAR)
+                                    
                                     Box(
                                         modifier = Modifier
                                             .weight(1f)
                                             .aspectRatio(1f)
                                             .clip(CircleShape)
-                                            .background(if (isSelected) LocalAccentColor.current else Color.Transparent)
+                                            .background(
+                                                when {
+                                                    isSelected -> LocalAccentColor.current
+                                                    isToday -> LocalAccentColor.current.copy(alpha = 0.2f)
+                                                    else -> Color.Transparent
+                                                }
+                                            )
                                             .clickable {
                                                 selectedDay = dayNum
                                                 showDayDetail = true
@@ -1257,7 +1364,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                             "$dayNum",
                                             color = if (isSelected) Color.White else LocalTextPrimary.current,
                                             fontSize = 14.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                            fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Normal
                                         )
                                     }
                                 } else {
@@ -1807,6 +1914,12 @@ fun ProductivityTools() {
             Row(modifier = Modifier.padding(4.dp)) {
                 listOf("Pomodoro", "Timer", "Stopwatch").forEachIndexed { index, title ->
                     val isSelected = selectedTool == index
+                    val isActive = when(index) {
+                        0 -> isPomoRunning
+                        1 -> isTimerRunning
+                        2 -> isStopWatchRunning
+                        else -> false
+                    }
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -1816,12 +1929,18 @@ fun ProductivityTools() {
                             .clickable { selectedTool = index },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            title,
-                            color = if (isSelected) Color.White else LocalTextSecondary.current,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                title,
+                                color = if (isSelected) Color.White else LocalTextSecondary.current,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            if (isActive && !isSelected) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Box(modifier = Modifier.size(6.dp).background(SuccessEmerald, CircleShape))
+                            }
+                        }
                     }
                 }
             }
@@ -2356,15 +2475,17 @@ fun ProfileMain(
                                 AsyncImage(
                                     model = photoUri,
                                     contentDescription = null,
-                                    modifier = Modifier.fillMaxSize().clip(CircleShape),
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(CircleShape),
                                     contentScale = androidx.compose.ui.layout.ContentScale.Crop
                                 )
                             } else {
                                 Icon(
-                                    Icons.Rounded.Person,
+                                    painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_app_logo),
                                     contentDescription = null,
                                     modifier = Modifier.size(64.dp),
-                                    tint = accent
+                                    tint = Color.Unspecified
                                 )
                             }
                         }
@@ -2532,7 +2653,9 @@ fun PersonalDetailsScreen(name: String, bio: String, onBack: () -> Unit, onSave:
             
             Button(
                 onClick = { onSave(tempName, tempBio); onBack() },
-                modifier = Modifier.fillMaxWidth().height(56.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = LocalAccentColor.current)
             ) {
@@ -2563,15 +2686,26 @@ fun ProfileInputField(label: String, value: String, onValueChange: (String) -> U
 
 @Composable
 fun NotificationsSettingsScreen(onBack: () -> Unit) {
-    var remindersEnabled by remember { mutableStateOf(true) }
-    var focusEnabled by remember { mutableStateOf(true) }
-    var soundEnabled by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val dataManager = remember { DataManager(context) }
+    var remindersEnabled by remember { mutableStateOf(dataManager.isNotificationEnabled("reminders_enabled")) }
+    var focusEnabled by remember { mutableStateOf(dataManager.isNotificationEnabled("focus_enabled")) }
+    var soundEnabled by remember { mutableStateOf(dataManager.isNotificationEnabled("sound_enabled", false)) }
 
     SubScreenScaffold("Notifications", onBack) {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            SettingSwitchRow("Reminders", "Get notified for your tasks", remindersEnabled) { remindersEnabled = it }
-            SettingSwitchRow("Focus Mode", "Alerts when session ends", focusEnabled) { focusEnabled = it }
-            SettingSwitchRow("Sound & Vibration", "Alert with sound", soundEnabled) { soundEnabled = it }
+            SettingSwitchRow("Reminders", "Get notified for your tasks", remindersEnabled) { 
+                remindersEnabled = it
+                dataManager.saveNotificationEnabled("reminders_enabled", it)
+            }
+            SettingSwitchRow("Focus Mode", "Alerts when session ends", focusEnabled) { 
+                focusEnabled = it
+                dataManager.saveNotificationEnabled("focus_enabled", it)
+            }
+            SettingSwitchRow("Sound & Vibration", "Alert with sound", soundEnabled) { 
+                soundEnabled = it
+                dataManager.saveNotificationEnabled("sound_enabled", it)
+            }
         }
     }
 }
@@ -2651,7 +2785,7 @@ fun AppearanceSettingsScreen(
                                     .size(48.dp)
                                     .clip(CircleShape)
                                     .background(color)
-                                    .clickable { 
+                                    .clickable {
                                         selectedAccent = color
                                         onUpdate(selectedTheme, color)
                                     }
@@ -2680,7 +2814,9 @@ fun AppearanceSettingsScreen(
                     ) {
                         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(40.dp).background(selectedAccent.copy(0.1f), CircleShape), contentAlignment = Alignment.Center) {
+                                Box(modifier = Modifier
+                                    .size(40.dp)
+                                    .background(selectedAccent.copy(0.1f), CircleShape), contentAlignment = Alignment.Center) {
                                     Icon(Icons.Rounded.Notifications, null, tint = selectedAccent, modifier = Modifier.size(20.dp))
                                 }
                                 Spacer(modifier = Modifier.width(12.dp))
@@ -2693,7 +2829,9 @@ fun AppearanceSettingsScreen(
                             }
                             Button(
                                 onClick = {},
-                                modifier = Modifier.fillMaxWidth().height(48.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp),
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = selectedAccent)
                             ) {
@@ -2705,21 +2843,16 @@ fun AppearanceSettingsScreen(
             }
         }
         
-        Button(
-            onClick = onBack,
-            modifier = Modifier.fillMaxWidth().height(56.dp).padding(vertical = 8.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = selectedAccent)
-        ) {
-            Text("Done", fontWeight = FontWeight.Bold)
-        }
+        Spacer(modifier = Modifier.height(24.dp))
     }
 }
 
 @Composable
 fun ThemeCard(label: String, icon: ImageVector, isSelected: Boolean, modifier: Modifier, onClick: () -> Unit) {
     Surface(
-        modifier = modifier.height(110.dp).clickable { onClick() },
+        modifier = modifier
+            .height(110.dp)
+            .clickable { onClick() },
         shape = RoundedCornerShape(20.dp),
         color = if (isSelected) LocalAccentColor.current else LocalSurfaceColor.current,
         border = if (isSelected) null else BorderStroke(1.dp, Color.White.copy(0.05f))
@@ -2788,7 +2921,9 @@ fun HelpSupportScreen(onBack: () -> Unit) {
                     border = BorderStroke(1.dp, Color.White.copy(0.03f))
                 ) {
                     Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.size(10.dp).background(SuccessEmerald, CircleShape))
+                        Box(modifier = Modifier
+                            .size(10.dp)
+                            .background(SuccessEmerald, CircleShape))
                         Spacer(modifier = Modifier.width(12.dp))
                         Text("All Systems Operational", color = LocalTextPrimary.current, fontWeight = FontWeight.Medium)
                     }
@@ -2817,11 +2952,15 @@ fun EditProfileOverlay(
     }
 
     Surface(
-        modifier = Modifier.fillMaxSize().imePadding(),
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding(),
         color = LocalBgColor.current.copy(alpha = 0.98f)
     ) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -2836,7 +2975,9 @@ fun EditProfileOverlay(
                         AsyncImage(
                             model = tempPhotoUri,
                             contentDescription = null,
-                            modifier = Modifier.fillMaxSize().clip(CircleShape),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(CircleShape),
                             contentScale = androidx.compose.ui.layout.ContentScale.Crop
                         )
                     } else {
@@ -2864,7 +3005,9 @@ fun EditProfileOverlay(
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 OutlinedButton(
                     onClick = onDismiss,
-                    modifier = Modifier.weight(1f).height(56.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(56.dp),
                     shape = RoundedCornerShape(16.dp),
                     border = BorderStroke(1.dp, LocalSurfaceColor.current)
                 ) {
@@ -2872,7 +3015,9 @@ fun EditProfileOverlay(
                 }
                 Button(
                     onClick = { onSave(tempName, tempBio, tempPhotoUri) },
-                    modifier = Modifier.weight(1f).height(56.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(56.dp),
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = LocalAccentColor.current)
                 ) {

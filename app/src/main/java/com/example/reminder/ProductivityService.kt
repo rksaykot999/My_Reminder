@@ -3,6 +3,7 @@ package com.example.reminder
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.*
 import androidx.core.app.NotificationCompat
 import java.util.*
@@ -31,6 +32,11 @@ class ProductivityService : Service() {
     private val ID_TIMER = 1002
     private val ID_STOPWATCH = 1003
     private val ID_SERVICE = 1000
+    private val ID_ALERTS = 2000
+
+    private var lastUpdatePomo = 0L
+    private var lastUpdateTimer = 0L
+    private var lastUpdateStopwatch = 0L
 
     inner class ProductivityBinder : Binder() {
         fun getService(): ProductivityService = this@ProductivityService
@@ -78,7 +84,17 @@ class ProductivityService : Service() {
     }
 
     private fun ensureForeground() {
-        startForeground(ID_SERVICE, createServiceNotification())
+        val notification = createServiceNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            }
+            startForeground(ID_SERVICE, notification, type)
+        } else {
+            startForeground(ID_SERVICE, notification)
+        }
     }
 
     private fun startTicking() {
@@ -93,58 +109,80 @@ class ProductivityService : Service() {
     }
 
     private fun tick() {
+        val now = System.currentTimeMillis()
         if (isPomoRunning && pomoTime > 0) {
             pomoTime -= 100
             if (pomoTime <= 0) {
+                pomoTime = 0
                 isPomoRunning = false
-                showFinishedNotification("Pomodoro Finished", "Time to take a break!", 2001)
+                showFinishedNotification("Pomodoro Finished", "Time to take a break!", ID_ALERTS + 1)
             }
         }
         if (isTimerRunning && timerTime > 0) {
             timerTime -= 100
             if (timerTime <= 0) {
+                timerTime = 0
                 isTimerRunning = false
-                showFinishedNotification("Timer Finished", "Your countdown has ended.", 2002)
+                showFinishedNotification("Timer Finished", "Your countdown has ended.", ID_ALERTS + 2)
             }
         }
         if (isStopwatchRunning) {
             stopwatchTime += 100
         }
 
-        updateAllNotifications()
+        // Update notifications every 1 second to avoid throttling and save battery
+        if (now - lastUpdatePomo >= 1000) {
+            updatePomoNotification()
+            lastUpdatePomo = now
+        }
+        if (now - lastUpdateTimer >= 1000) {
+            updateTimerNotification()
+            lastUpdateTimer = now
+        }
+        if (now - lastUpdateStopwatch >= 1000) {
+            updateStopwatchNotification()
+            lastUpdateStopwatch = now
+        }
     }
 
     private fun updateAllNotifications() {
+        updatePomoNotification()
+        updateTimerNotification()
+        updateStopwatchNotification()
+    }
+
+    private fun updatePomoNotification() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        
-        // Pomo
-        if (isPomoRunning || pomoTime != 25 * 60 * 1000L) {
+        if (isPomoRunning || (pomoTime > 0 && pomoTime != 25 * 60 * 1000L)) {
             manager.notify(ID_POMO, createToolNotification("Pomodoro ($pomoStage)", formatTime(pomoTime), "RESET_POMO"))
         } else {
             manager.cancel(ID_POMO)
         }
+    }
 
-        // Timer
-        if (isTimerRunning || timerTime != maxTimerTime) {
+    private fun updateTimerNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (isTimerRunning || (timerTime > 0 && timerTime != maxTimerTime)) {
             manager.notify(ID_TIMER, createToolNotification("Timer", formatTime(timerTime), "RESET_TIMER"))
         } else {
             manager.cancel(ID_TIMER)
         }
+    }
 
-        // Stopwatch
+    private fun updateStopwatchNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (isStopwatchRunning || stopwatchTime > 0) {
-            manager.notify(ID_STOPWATCH, createToolNotification("Stopwatch", formatTimeWithMs(stopwatchTime), "RESET_STOPWATCH"))
+            manager.notify(ID_STOPWATCH, createToolNotification("Stopwatch", formatTime(stopwatchTime), "RESET_STOPWATCH"))
         } else {
             manager.cancel(ID_STOPWATCH)
         }
-
-        // If nothing is running and all are at reset state, we could potentially stop the service, 
-        // but user might want to keep it. We'll keep the ID_SERVICE notification as long as service is alive.
     }
 
     private fun createToolNotification(title: String, content: String, resetAction: String): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(this, resetAction.hashCode(), intent, PendingIntent.FLAG_IMMUTABLE)
 
         val resetIntent = Intent(this, ProductivityService::class.java).apply { action = resetAction }
         val resetPendingIntent = PendingIntent.getService(this, resetAction.hashCode(), resetIntent, PendingIntent.FLAG_IMMUTABLE)
@@ -152,7 +190,7 @@ class ProductivityService : Service() {
         return NotificationCompat.Builder(this, "PRODUCTIVITY_CHANNEL")
             .setContentTitle(title)
             .setContentText(content)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_notification_clock)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(pendingIntent)
@@ -161,16 +199,18 @@ class ProductivityService : Service() {
     }
 
     private fun createServiceNotification(): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(this, 99, intent, PendingIntent.FLAG_IMMUTABLE)
 
         val stopIntent = Intent(this, ProductivityService::class.java).apply { action = "STOP_SERVICE" }
-        val stopPendingIntent = PendingIntent.getService(this, 99, stopIntent, PendingIntent.FLAG_IMMUTABLE)
+        val stopPendingIntent = PendingIntent.getService(this, 100, stopIntent, PendingIntent.FLAG_IMMUTABLE)
 
         return NotificationCompat.Builder(this, "PRODUCTIVITY_CHANNEL")
-            .setContentTitle("Productivity Tools")
-            .setContentText("Tools are running in background")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Reminder Pro")
+            .setContentText("Productivity Tools are active")
+            .setSmallIcon(R.drawable.ic_notification_clock)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop All", stopPendingIntent)
@@ -178,13 +218,16 @@ class ProductivityService : Service() {
     }
 
     private fun showFinishedNotification(title: String, text: String, id: Int) {
+        val dataManager = DataManager(this)
+        if (!dataManager.isNotificationEnabled("focus_enabled")) return
+
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val builder = NotificationCompat.Builder(this, "PRODUCTIVITY_CHANNEL")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+        val builder = NotificationCompat.Builder(this, "PRODUCTIVITY_ALERTS")
+            .setSmallIcon(R.drawable.ic_notification_clock)
             .setContentTitle(title)
             .setContentText(text)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setVibrate(longArrayOf(0, 500, 200, 500))
+            .setDefaults(Notification.DEFAULT_ALL)
             .setAutoCancel(true)
         manager.notify(id, builder.build())
     }
@@ -205,9 +248,22 @@ class ProductivityService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel("PRODUCTIVITY_CHANNEL", "Productivity Tools", NotificationManager.IMPORTANCE_LOW)
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            val toolsChannel = NotificationChannel(
+                "PRODUCTIVITY_CHANNEL",
+                "Productivity Tools",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val alertsChannel = NotificationChannel(
+                "PRODUCTIVITY_ALERTS",
+                "Productivity Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                enableLights(true)
+                enableVibration(true)
+            }
+            manager.createNotificationChannel(toolsChannel)
+            manager.createNotificationChannel(alertsChannel)
         }
     }
 
