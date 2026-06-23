@@ -9,22 +9,46 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.TimePickerDialog
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
-import androidx.compose.foundation.*
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -56,13 +80,14 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import coil.compose.AsyncImage
+import androidx.core.content.edit
 import com.example.reminder.ui.theme.ReminderTheme
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
-import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.delay
 
 // --- Data Models ---
@@ -94,14 +119,18 @@ data class Note(
 )
 
 // --- Universal Premium Palette ---
-val BgColor = Color(0xFF0F172A)
-val SurfaceColor = Color(0xFF1E293B)
-val PrimaryIndigo = Color(0xFF6366F1)
 val SuccessEmerald = Color(0xFF10B981)
 val WarningAmber = Color(0xFFF59E0B)
 val DangerRose = Color(0xFFF43F5E)
 val TextPrimary = Color(0xFFF8FAFC)
 val TextSecondary = Color(0xFF94A3B8)
+
+val LocalAccentColor = compositionLocalOf { Color(0xFF6366F1) }
+val LocalBgColor = compositionLocalOf { Color(0xFF0F172A) }
+val LocalSurfaceColor = compositionLocalOf { Color(0xFF1E293B) }
+val LocalTextPrimary = compositionLocalOf { Color(0xFFF8FAFC) }
+val LocalTextSecondary = compositionLocalOf { Color(0xFF94A3B8) }
+val LocalIsDarkTheme = compositionLocalOf { true }
 
 // --- Local Storage Manager ---
 class DataManager(context: Context) {
@@ -110,7 +139,7 @@ class DataManager(context: Context) {
 
     fun saveReminders(reminders: List<Reminder>) {
         val json = gson.toJson(reminders)
-        prefs.edit().putString("reminders", json).apply()
+        prefs.edit { putString("reminders", json) }
     }
 
     fun loadReminders(): List<Reminder> {
@@ -121,7 +150,7 @@ class DataManager(context: Context) {
 
     fun saveNotes(notes: List<Note>) {
         val json = gson.toJson(notes)
-        prefs.edit().putString("notes", json).apply()
+        prefs.edit { putString("notes", json) }
     }
 
     fun loadNotes(): List<Note> {
@@ -130,15 +159,39 @@ class DataManager(context: Context) {
         return gson.fromJson(json, type)
     }
 
-    fun saveProfile(name: String, bio: String) {
-        prefs.edit().putString("user_name", name).putString("user_bio", bio).apply()
+    fun saveProfile(name: String, bio: String, photoUri: String?) {
+        prefs.edit {
+            putString("user_name", name)
+            putString("user_bio", bio)
+            putString("user_photo", photoUri)
+        }
     }
 
-    fun loadProfile(): Pair<String, String> {
+    fun loadProfile(): Triple<String, String, String?> {
         val name = prefs.getString("user_name", "User Name") ?: "User Name"
         val bio = prefs.getString("user_bio", "Set your status") ?: "Set your status"
-        return name to bio
+        val photoUri = prefs.getString("user_photo", null)
+        return Triple(name, bio, photoUri)
     }
+
+    fun saveTheme(theme: Int) {
+        prefs.edit { putInt("app_theme", theme) }
+    }
+
+    fun loadTheme(): Int = prefs.getInt("app_theme", 0) // 0: Dark, 1: Light, 2: System
+
+    fun saveAccent(color: Int) {
+        prefs.edit { putInt("app_accent", color) }
+    }
+
+    fun loadAccent(): Int = prefs.getInt("app_accent", Color(0xFF6366F1).toArgb())
+}
+
+private fun Color.toArgb(): Int {
+    return (this.alpha * 255.0f + 0.5f).toInt() shl 24 or
+            ((this.red * 255.0f + 0.5f).toInt() shl 16) or
+            ((this.green * 255.0f + 0.5f).toInt() shl 8) or
+            (this.blue * 255.0f + 0.5f).toInt()
 }
 
 class MainActivity : ComponentActivity() {
@@ -147,9 +200,7 @@ class MainActivity : ComponentActivity() {
         createNotificationChannel()
         enableEdgeToEdge()
         setContent {
-            ReminderTheme {
-                MainContainer()
-            }
+            MainContainer()
         }
     }
 
@@ -182,8 +233,31 @@ class MainActivity : ComponentActivity() {
 class ReminderReceiver : BroadcastReceiver() {
     @SuppressLint("MissingPermission")
     override fun onReceive(context: Context, intent: Intent) {
+        val action = intent.action
+        if (action == "ACTION_DONE") {
+            val id = intent.getIntExtra("id", -1)
+            if (id != -1) {
+                markReminderAsDone(context, id)
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                notificationManager.cancel(id)
+            }
+            return
+        }
+
+        val id = intent.getIntExtra("id", 0)
         val title = intent.getStringExtra("title") ?: "Reminder"
         val desc = intent.getStringExtra("desc") ?: "You have a task to do!"
+
+        val doneIntent = Intent(context, ReminderReceiver::class.java).apply {
+            this.action = "ACTION_DONE"
+            putExtra("id", id)
+        }
+        val donePendingIntent = PendingIntent.getBroadcast(
+            context,
+            id + 1000,
+            doneIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         val builder = NotificationCompat.Builder(context, "TASK_REMINDER")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
@@ -191,6 +265,7 @@ class ReminderReceiver : BroadcastReceiver() {
             .setContentText(desc)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
+            .addAction(android.R.drawable.checkbox_on_background, "Done", donePendingIntent)
 
         with(NotificationManagerCompat.from(context)) {
             if (Build.VERSION.SDK_INT < 33 || ActivityCompat.checkSelfPermission(
@@ -198,9 +273,21 @@ class ReminderReceiver : BroadcastReceiver() {
                     Manifest.permission.POST_NOTIFICATIONS
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                notify(System.currentTimeMillis().toInt(), builder.build())
+                notify(id, builder.build())
             }
         }
+    }
+}
+
+fun markReminderAsDone(context: Context, id: Int) {
+    val dataManager = DataManager(context)
+    val reminders = dataManager.loadReminders().toMutableList()
+    val index = reminders.indexOfFirst { it.id == id }
+    if (index != -1) {
+        reminders[index] = reminders[index].copy(isCompleted = true)
+        dataManager.saveReminders(reminders)
+        // Refresh UI if app is open? This is harder without a shared viewmodel/repo
+        // but it updates the storage.
     }
 }
 
@@ -229,6 +316,7 @@ fun scheduleReminder(context: Context, reminder: Reminder) {
 
     val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     val intent = Intent(context, ReminderReceiver::class.java).apply {
+        putExtra("id", reminder.id)
         putExtra("title", reminder.title)
         putExtra("desc", reminder.description)
     }
@@ -273,13 +361,31 @@ fun MainContainer() {
         mutableStateListOf<Note>().apply { addAll(dataManager.loadNotes()) }
     }
 
-    val (initialName, initialBio) = remember { dataManager.loadProfile() }
+    val (initialName, initialBio, initialPhoto) = remember { dataManager.loadProfile() }
     var userName by rememberSaveable { mutableStateOf(initialName) }
     var userBio by rememberSaveable { mutableStateOf(initialBio) }
+    var userPhotoUri by rememberSaveable { mutableStateOf(initialPhoto) }
+
+    // --- THEME & APPEARANCE STATE ---
+    var appTheme by remember { mutableIntStateOf(dataManager.loadTheme()) }
+    var accentColorInt by remember { mutableIntStateOf(dataManager.loadAccent()) }
+    val currentAccentColor = remember(accentColorInt) { Color(accentColorInt) }
+
+    val isDark = when (appTheme) {
+        0 -> true
+        1 -> false
+        else -> isSystemInDarkTheme()
+    }
+
+    val dynamicBgColor = if (isDark) Color(0xFF0F172A) else Color(0xFFF1F5F9)
+    val dynamicSurfaceColor = if (isDark) Color(0xFF1E293B) else Color(0xFFFFFFFF)
+    val dynamicTextPrimary = if (isDark) Color(0xFFF8FAFC) else Color(0xFF0F172A)
+    val dynamicTextSecondary = if (isDark) Color(0xFF94A3B8) else Color(0xFF64748B)
 
     var isAddingReminder by remember { mutableStateOf(false) }
     var reminderToEdit by remember { mutableStateOf<Reminder?>(null) }
     var isAddingNote by remember { mutableStateOf(false) }
+    var noteToEdit by remember { mutableStateOf<Note?>(null) }
 
     // Save data when lists change
     LaunchedEffect(reminders.size, reminders.count { it.isCompleted }) {
@@ -289,11 +395,20 @@ fun MainContainer() {
         dataManager.saveNotes(notes)
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BgColor)
+    CompositionLocalProvider(
+        LocalAccentColor provides currentAccentColor,
+        LocalBgColor provides dynamicBgColor,
+        LocalSurfaceColor provides dynamicSurfaceColor,
+        LocalTextPrimary provides dynamicTextPrimary,
+        LocalTextSecondary provides dynamicTextSecondary,
+        LocalIsDarkTheme provides isDark
     ) {
+        ReminderTheme(darkTheme = isDark) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(LocalBgColor.current)
+            ) {
         Box(modifier = Modifier.fillMaxSize()) {
             AnimatedContent(
                 targetState = selectedItem,
@@ -342,16 +457,31 @@ fun MainContainer() {
                     )
                     NavItem.NOTES -> GeneralNotes(
                         notes = notes,
-                        onAddNote = { isAddingNote = true }
+                        onAddNote = { isAddingNote = true },
+                        onEditNote = { note -> noteToEdit = note },
+                        onDeleteNote = { id ->
+                            notes.removeIf { it.id == id }
+                            dataManager.saveNotes(notes)
+                        }
                     )
                     NavItem.FOCUS -> ProductivityTools()
                     NavItem.ME -> UniversalProfile(
                         name = userName,
                         bio = userBio,
-                        onUpdateProfile = { n, b ->
+                        photoUri = userPhotoUri,
+                        currentTheme = appTheme,
+                        currentAccent = currentAccentColor,
+                        onUpdateProfile = { n, b, p ->
                             userName = n
                             userBio = b
-                            dataManager.saveProfile(n, b)
+                            userPhotoUri = p
+                            dataManager.saveProfile(n, b, p)
+                        },
+                        onUpdateAppearance = { theme, accent ->
+                            appTheme = theme
+                            accentColorInt = accent.toArgb()
+                            dataManager.saveTheme(theme)
+                            dataManager.saveAccent(accent.toArgb())
                         }
                     )
                 }
@@ -391,19 +521,30 @@ fun MainContainer() {
             )
         }
 
-        if (isAddingNote) {
+        if (isAddingNote || noteToEdit != null) {
             NewNoteDialog(
-                onDismiss = { isAddingNote = false },
+                initialNote = noteToEdit,
+                onDismiss = { isAddingNote = false; noteToEdit = null },
                 onSave = { title, content ->
-                    val dateStr =
-                        SimpleDateFormat("MMM dd", Locale.getDefault()).format(Calendar.getInstance().time)
-                    notes.add(Note(notes.size + 1, title, content, dateStr))
-                    isAddingNote = false
+                    if (noteToEdit != null) {
+                        val index = notes.indexOfFirst { it.id == noteToEdit!!.id }
+                        if (index != -1) {
+                            notes[index] = noteToEdit!!.copy(title = title, content = content)
+                        }
+                        noteToEdit = null
+                    } else {
+                        val dateStr =
+                            SimpleDateFormat("MMM dd", Locale.getDefault()).format(Calendar.getInstance().time)
+                        notes.add(Note((notes.maxOfOrNull { it.id } ?: 0) + 1, title, content, dateStr))
+                        isAddingNote = false
+                    }
                     dataManager.saveNotes(notes)
                 }
             )
         }
     }
+}
+}
 }
 
 enum class NavItem(val icon: ImageVector) {
@@ -421,7 +562,7 @@ fun UniversalDock(selectedItem: NavItem, onItemSelected: (NavItem) -> Unit) {
             .height(64.dp)
             .padding(horizontal = 24.dp),
         shape = RoundedCornerShape(32.dp),
-        color = SurfaceColor.copy(alpha = 0.98f),
+        color = LocalSurfaceColor.current.copy(alpha = 0.98f),
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.05f)),
         shadowElevation = 16.dp
     ) {
@@ -438,14 +579,14 @@ fun UniversalDock(selectedItem: NavItem, onItemSelected: (NavItem) -> Unit) {
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(if (isSelected) PrimaryIndigo else Color.Transparent)
+                        .background(if (isSelected) LocalAccentColor.current else Color.Transparent)
                         .clickable { onItemSelected(item) },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = item.icon,
                         contentDescription = null,
-                        tint = if (isSelected) Color.White else TextSecondary,
+                        tint = if (isSelected) Color.White else LocalTextSecondary.current,
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -474,14 +615,14 @@ fun GeneralHome(
                 Column {
                     Text(
                         "WELCOME BACK",
-                        color = PrimaryIndigo,
+                        color = LocalAccentColor.current,
                         letterSpacing = 1.sp,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp
                     )
                     Text(
                         "Make it count.",
-                        color = TextPrimary,
+                        color = LocalTextPrimary.current,
                         style = MaterialTheme.typography.displaySmall,
                         fontWeight = FontWeight.ExtraBold
                     )
@@ -496,7 +637,7 @@ fun GeneralHome(
                         .fillMaxWidth()
                         .height(160.dp),
                     shape = RoundedCornerShape(28.dp),
-                    color = PrimaryIndigo
+                    color = LocalAccentColor.current
                 ) {
                     Box(modifier = Modifier.padding(24.dp)) {
                         Column {
@@ -546,7 +687,7 @@ fun GeneralHome(
             item {
                 Text(
                     "Upcoming Today",
-                    color = TextPrimary,
+                    color = LocalTextPrimary.current,
                     fontWeight = FontWeight.Bold,
                     fontSize = 20.sp
                 )
@@ -566,7 +707,7 @@ fun GeneralHome(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(bottom = 110.dp, end = 24.dp),
-            containerColor = PrimaryIndigo,
+            containerColor = LocalAccentColor.current,
             contentColor = Color.White,
             shape = RoundedCornerShape(20.dp)
         ) {
@@ -580,7 +721,7 @@ fun HomeStatCard(label: String, value: String, icon: ImageVector, color: Color, 
     Surface(
         modifier = modifier.height(110.dp),
         shape = RoundedCornerShape(24.dp),
-        color = SurfaceColor
+        color = LocalSurfaceColor.current
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -588,8 +729,8 @@ fun HomeStatCard(label: String, value: String, icon: ImageVector, color: Color, 
         ) {
             Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(24.dp))
             Column {
-                Text(label, color = TextSecondary, fontSize = 11.sp)
-                Text(value, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text(label, color = LocalTextSecondary.current, fontSize = 11.sp)
+                Text(value, color = LocalTextPrimary.current, fontWeight = FontWeight.Bold, fontSize = 20.sp)
             }
         }
     }
@@ -604,7 +745,7 @@ fun TaskRow(reminder: Reminder, onToggle: () -> Unit, onEdit: () -> Unit, onDele
             .padding(vertical = 2.dp)
             .clickable { onToggle() },
         shape = RoundedCornerShape(20.dp),
-        color = SurfaceColor,
+        color = LocalSurfaceColor.current,
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.03f))
     ) {
         Row(
@@ -614,7 +755,7 @@ fun TaskRow(reminder: Reminder, onToggle: () -> Unit, onEdit: () -> Unit, onDele
             Box(
                 modifier = Modifier
                     .size(24.dp)
-                    .border(2.dp, if (reminder.isCompleted) SuccessEmerald else PrimaryIndigo, CircleShape)
+                    .border(2.dp, if (reminder.isCompleted) SuccessEmerald else LocalAccentColor.current, CircleShape)
                     .padding(4.dp)
             ) {
                 if (reminder.isCompleted) Icon(
@@ -628,7 +769,7 @@ fun TaskRow(reminder: Reminder, onToggle: () -> Unit, onEdit: () -> Unit, onDele
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = reminder.title,
-                    color = if (reminder.isCompleted) TextSecondary else TextPrimary,
+                    color = if (reminder.isCompleted) LocalTextSecondary.current else LocalTextPrimary.current,
                     fontWeight = FontWeight.Medium,
                     style = if (reminder.isCompleted) MaterialTheme.typography.bodyMedium.copy(
                         textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough
@@ -636,7 +777,7 @@ fun TaskRow(reminder: Reminder, onToggle: () -> Unit, onEdit: () -> Unit, onDele
                 )
                 Text(
                     "${reminder.date} • ${reminder.time} • ${reminder.category.label}",
-                    color = TextSecondary,
+                    color = LocalTextSecondary.current,
                     fontSize = 12.sp
                 )
             }
@@ -645,21 +786,21 @@ fun TaskRow(reminder: Reminder, onToggle: () -> Unit, onEdit: () -> Unit, onDele
                     Icon(
                         Icons.Rounded.MoreVert,
                         contentDescription = "More Options",
-                        tint = TextSecondary
+                        tint = LocalTextSecondary.current
                     )
                 }
                 DropdownMenu(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false },
-                    modifier = Modifier.background(SurfaceColor)
+                    modifier = Modifier.background(LocalSurfaceColor.current)
                 ) {
                     DropdownMenuItem(
-                        text = { Text("Edit", color = TextPrimary) },
+                        text = { Text("Edit", color = LocalTextPrimary.current) },
                         leadingIcon = {
                             Icon(
                                 Icons.Rounded.Edit,
                                 contentDescription = null,
-                                tint = PrimaryIndigo
+                                tint = LocalAccentColor.current
                             )
                         },
                         onClick = { showMenu = false; onEdit() }
@@ -741,7 +882,7 @@ fun NewReminderScreen(
         modifier = Modifier
             .fillMaxSize()
             .imePadding(),
-        color = BgColor
+        color = LocalBgColor.current
     ) {
         Column(
             modifier = Modifier
@@ -754,13 +895,13 @@ fun NewReminderScreen(
                     Icon(
                         Icons.AutoMirrored.Rounded.ArrowBack,
                         contentDescription = "Back",
-                        tint = TextPrimary
+                        tint = LocalTextPrimary.current
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     "New Reminder",
-                    color = TextPrimary,
+                    color = LocalTextPrimary.current,
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -774,7 +915,7 @@ fun NewReminderScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
                             "TASK INFORMATION",
-                            color = TextSecondary,
+                            color = LocalTextSecondary.current,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
                             letterSpacing = 1.sp
@@ -785,16 +926,16 @@ fun NewReminderScreen(
                             placeholder = {
                                 Text(
                                     "What needs to be done?",
-                                    color = TextSecondary.copy(alpha = 0.5f)
+                                    color = LocalTextSecondary.current.copy(alpha = 0.5f)
                                 )
                             },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = PrimaryIndigo,
-                                unfocusedBorderColor = SurfaceColor,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
+                                focusedBorderColor = LocalAccentColor.current,
+                                unfocusedBorderColor = LocalSurfaceColor.current,
+                                focusedTextColor = LocalTextPrimary.current,
+                                unfocusedTextColor = LocalTextPrimary.current
                             )
                         )
                         OutlinedTextField(
@@ -803,7 +944,7 @@ fun NewReminderScreen(
                             placeholder = {
                                 Text(
                                     "Add more details or notes...",
-                                    color = TextSecondary.copy(alpha = 0.5f)
+                                    color = LocalTextSecondary.current.copy(alpha = 0.5f)
                                 )
                             },
                             modifier = Modifier
@@ -811,10 +952,10 @@ fun NewReminderScreen(
                                 .height(120.dp),
                             shape = RoundedCornerShape(16.dp),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = PrimaryIndigo,
-                                unfocusedBorderColor = SurfaceColor,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
+                                focusedBorderColor = LocalAccentColor.current,
+                                unfocusedBorderColor = LocalSurfaceColor.current,
+                                focusedTextColor = LocalTextPrimary.current,
+                                unfocusedTextColor = LocalTextPrimary.current
                             )
                         )
                     }
@@ -823,7 +964,7 @@ fun NewReminderScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
                             "SET PRIORITY",
-                            color = TextSecondary,
+                            color = LocalTextSecondary.current,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
                             letterSpacing = 1.sp
@@ -838,7 +979,7 @@ fun NewReminderScreen(
                                             .height(48.dp)
                                             .clickable { priority = label },
                                         shape = RoundedCornerShape(12.dp),
-                                        color = if (isSelected) color else SurfaceColor
+                                        color = if (isSelected) color else LocalSurfaceColor.current
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Text(
@@ -857,7 +998,7 @@ fun NewReminderScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
                             "SCHEDULE",
-                            color = TextSecondary,
+                            color = LocalTextSecondary.current,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
                             letterSpacing = 1.sp
@@ -882,7 +1023,7 @@ fun NewReminderScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
                             "CATEGORY",
-                            color = TextSecondary,
+                            color = LocalTextSecondary.current,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
                             letterSpacing = 1.sp
@@ -896,7 +1037,7 @@ fun NewReminderScreen(
                                         .height(80.dp)
                                         .clickable { category = cat },
                                     shape = RoundedCornerShape(16.dp),
-                                    color = if (isSelected) cat.color else SurfaceColor,
+                                    color = if (isSelected) cat.color else LocalSurfaceColor.current,
                                     border = if (isSelected) null else BorderStroke(
                                         1.dp,
                                         Color.White.copy(alpha = 0.05f)
@@ -916,7 +1057,7 @@ fun NewReminderScreen(
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
                                             cat.label,
-                                            color = if (isSelected) Color.White else TextPrimary,
+                                            color = if (isSelected) Color.White else LocalTextPrimary.current,
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold
                                         )
@@ -947,7 +1088,7 @@ fun NewReminderScreen(
                     .height(60.dp)
                     .padding(vertical = 4.dp),
                 shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo)
+                colors = ButtonDefaults.buttonColors(containerColor = LocalAccentColor.current)
             ) {
                 Text(
                     if (initialReminder != null) "Update Task" else "Create Task",
@@ -975,7 +1116,7 @@ fun ScheduleCard(
             .clip(RoundedCornerShape(20.dp))
             .clickable { onClick() },
         shape = RoundedCornerShape(20.dp),
-        color = SurfaceColor.copy(alpha = 0.7f),
+        color = LocalSurfaceColor.current.copy(alpha = 0.7f),
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
     ) {
         Row(
@@ -987,16 +1128,16 @@ fun ScheduleCard(
             Box(
                 modifier = Modifier
                     .size(40.dp)
-                    .background(PrimaryIndigo.copy(alpha = 0.1f), CircleShape),
+                    .background(LocalAccentColor.current.copy(alpha = 0.1f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(icon, contentDescription = null, tint = PrimaryIndigo, modifier = Modifier.size(20.dp))
+                Icon(icon, contentDescription = null, tint = LocalAccentColor.current, modifier = Modifier.size(20.dp))
             }
             Spacer(modifier = Modifier.width(12.dp))
             Column(verticalArrangement = Arrangement.Center) {
                 Text(
                     text = label,
-                    color = TextSecondary,
+                    color = LocalTextSecondary.current,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium
                 )
@@ -1037,7 +1178,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(SurfaceColor.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
+                        .background(LocalSurfaceColor.current.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
                         .padding(16.dp)
                 ) {
                     Row(
@@ -1047,7 +1188,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                     ) {
                         Text(
                             currentMonth,
-                            color = TextPrimary,
+                            color = LocalTextPrimary.current,
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 20.sp
                         )
@@ -1056,14 +1197,14 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                 Icon(
                                     Icons.Rounded.ChevronLeft,
                                     null,
-                                    tint = TextPrimary
+                                    tint = LocalTextPrimary.current
                                 )
                             }
                             IconButton(onClick = {}) {
                                 Icon(
                                     Icons.Rounded.ChevronRight,
                                     null,
-                                    tint = TextPrimary
+                                    tint = LocalTextPrimary.current
                                 )
                             }
                         }
@@ -1078,7 +1219,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                 day,
                                 modifier = Modifier.weight(1f),
                                 textAlign = TextAlign.Center,
-                                color = if (day == "S") DangerRose else TextSecondary,
+                                color = if (day == "S") DangerRose else LocalTextSecondary.current,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -1105,7 +1246,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                             .weight(1f)
                                             .aspectRatio(1f)
                                             .clip(CircleShape)
-                                            .background(if (isSelected) PrimaryIndigo else Color.Transparent)
+                                            .background(if (isSelected) LocalAccentColor.current else Color.Transparent)
                                             .clickable {
                                                 selectedDay = dayNum
                                                 showDayDetail = true
@@ -1114,7 +1255,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                     ) {
                                         Text(
                                             "$dayNum",
-                                            color = if (isSelected) Color.White else TextPrimary,
+                                            color = if (isSelected) Color.White else LocalTextPrimary.current,
                                             fontSize = 14.sp,
                                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                                         )
@@ -1133,7 +1274,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
             item {
                 Text(
                     text = "Reminders for $selectedDay $monthShort",
-                    color = TextPrimary,
+                    color = LocalTextPrimary.current,
                     fontWeight = FontWeight.Bold,
                     fontSize = 18.sp
                 )
@@ -1145,7 +1286,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                 item {
                     Text(
                         "No events scheduled",
-                        color = TextSecondary,
+                        color = LocalTextSecondary.current,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 16.dp),
@@ -1187,7 +1328,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                         .wrapContentHeight()
                         .clickable(enabled = false) {},
                     shape = RoundedCornerShape(32.dp),
-                    color = SurfaceColor,
+                    color = LocalSurfaceColor.current,
                     border = BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
                 ) {
                     Column(modifier = Modifier.padding(24.dp)) {
@@ -1199,14 +1340,14 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     "$selectedDay",
-                                    color = TextPrimary,
+                                    color = LocalTextPrimary.current,
                                     fontSize = 28.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     "Details",
-                                    color = TextPrimary,
+                                    color = LocalTextPrimary.current,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Medium
                                 )
@@ -1215,25 +1356,26 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                 Icon(
                                     Icons.AutoMirrored.Rounded.EventNote,
                                     null,
-                                    tint = TextSecondary,
+                                    tint = LocalTextSecondary.current,
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Icon(
                                     Icons.Rounded.EmojiEmotions,
                                     null,
-                                    tint = TextSecondary,
+                                    tint = LocalTextSecondary.current,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
                         }
 
                         Spacer(modifier = Modifier.height(16.dp))
+                        val dividerColor = LocalTextSecondary.current.copy(alpha = 0.2f)
                         Canvas(modifier = Modifier
                             .fillMaxWidth()
                             .height(1.dp)) {
                             drawLine(
-                                color = TextSecondary.copy(alpha = 0.2f),
+                                color = dividerColor,
                                 start = Offset(0f, 0f),
                                 end = Offset(size.width, 0f),
                                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
@@ -1245,7 +1387,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                             if (filteredReminders.isEmpty()) {
                                 Text(
                                     "No events scheduled",
-                                    color = TextSecondary,
+                                    color = LocalTextSecondary.current,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(vertical = 16.dp),
@@ -1272,7 +1414,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(56.dp)
-                                .background(BgColor.copy(alpha = 0.5f), CircleShape)
+                                .background(LocalBgColor.current.copy(alpha = 0.5f), CircleShape)
                                 .padding(start = 20.dp, end = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -1280,11 +1422,11 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                 value = quickNote,
                                 onValueChange = { quickNote = it },
                                 modifier = Modifier.weight(1f),
-                                textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary),
+                                textStyle = MaterialTheme.typography.bodyMedium.copy(color = LocalTextPrimary.current),
                                 decorationBox = { innerTextField ->
                                     if (quickNote.isEmpty()) Text(
                                         "Add on $selectedDay $monthShort",
-                                        color = TextSecondary,
+                                        color = LocalTextSecondary.current,
                                         fontSize = 14.sp
                                     )
                                     innerTextField()
@@ -1294,7 +1436,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                 modifier = Modifier
                                     .size(40.dp),
                                 shape = CircleShape,
-                                color = SurfaceColor,
+                                color = LocalSurfaceColor.current,
                                 border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
                                 onClick = {
                                     if (quickNote.isNotBlank()) {
@@ -1307,7 +1449,7 @@ fun UniversalCalendar(reminders: List<Reminder>, onQuickAdd: (String, String) ->
                                     Icon(
                                         Icons.Rounded.Add,
                                         null,
-                                        tint = TextPrimary,
+                                        tint = LocalTextPrimary.current,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -1329,7 +1471,7 @@ fun DayEventItem(time: String, title: String, duration: String, color: Color, ic
         Text(
             time,
             modifier = Modifier.width(45.dp),
-            color = TextPrimary,
+            color = LocalTextPrimary.current,
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.End
@@ -1344,8 +1486,8 @@ fun DayEventItem(time: String, title: String, duration: String, color: Color, ic
         )
         Spacer(modifier = Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text(duration, color = TextSecondary, fontSize = 12.sp)
+            Text(title, color = LocalTextPrimary.current, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(duration, color = LocalTextSecondary.current, fontSize = 12.sp)
         }
         Icon(icon, null, tint = color.copy(alpha = 0.8f), modifier = Modifier.size(24.dp))
     }
@@ -1353,49 +1495,47 @@ fun DayEventItem(time: String, title: String, duration: String, color: Color, ic
 
 // --- UPDATED NOTES SECTION ---
 @Composable
-fun GeneralNotes(notes: List<Note>, onAddNote: () -> Unit) {
+fun GeneralNotes(
+    notes: List<Note>,
+    onAddNote: () -> Unit,
+    onEditNote: (Note) -> Unit,
+    onDeleteNote: (Int) -> Unit
+) {
     var selectedNote by remember { mutableStateOf<Note?>(null) }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(
+        LazyVerticalStaggeredGrid(
+            columns = StaggeredGridCells.Fixed(2),
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            contentPadding = PaddingValues(top = 72.dp, bottom = 110.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalItemSpacing = 16.dp
         ) {
-            item { Spacer(modifier = Modifier.height(72.dp)) }
-            item {
+            item(span = StaggeredGridItemSpan.FullLine) {
                 Text(
                     "My Notes",
-                    color = TextPrimary,
+                    color = LocalTextPrimary.current,
                     style = MaterialTheme.typography.displaySmall,
-                    fontWeight = FontWeight.ExtraBold
+                    fontWeight = FontWeight.ExtraBold,
+                    modifier = Modifier.padding(bottom = 8.dp)
                 )
             }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    notes.chunked(2).forEach { rowNotes ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                            rowNotes.forEach { note ->
-                                NoteCard(
-                                    note = note,
-                                    modifier = Modifier.weight(1f),
-                                    onClick = { selectedNote = note }
-                                )
-                            }
-                            if (rowNotes.size == 1) Spacer(modifier = Modifier.weight(1f))
-                        }
-                    }
-                }
+            items(notes) { note ->
+                NoteCard(
+                    note = note,
+                    onClick = { selectedNote = note }
+                )
             }
-            item { Spacer(modifier = Modifier.height(110.dp)) }
         }
+
         FloatingActionButton(
             onClick = onAddNote,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(bottom = 110.dp, end = 24.dp),
-            containerColor = PrimaryIndigo,
+            containerColor = LocalAccentColor.current,
             contentColor = Color.White,
             shape = RoundedCornerShape(20.dp)
         ) {
@@ -1415,7 +1555,7 @@ fun GeneralNotes(notes: List<Note>, onAddNote: () -> Unit) {
                     .padding(24.dp)
                     .wrapContentHeight(),
                 shape = RoundedCornerShape(28.dp),
-                color = SurfaceColor,
+                color = LocalSurfaceColor.current,
                 border = BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
             ) {
                 Column(modifier = Modifier.padding(24.dp)) {
@@ -1426,25 +1566,40 @@ fun GeneralNotes(notes: List<Note>, onAddNote: () -> Unit) {
                     ) {
                         Text(
                             selectedNote!!.title,
-                            color = TextPrimary,
+                            color = LocalTextPrimary.current,
                             style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
                         )
-                        IconButton(onClick = { selectedNote = null }) {
-                            Icon(Icons.Rounded.Close, contentDescription = "Close", tint = TextSecondary)
+                        Row {
+                            IconButton(onClick = {
+                                onEditNote(selectedNote!!)
+                                selectedNote = null
+                            }) {
+                                Icon(Icons.Rounded.Edit, contentDescription = "Edit", tint = LocalAccentColor.current)
+                            }
+                            IconButton(onClick = {
+                                onDeleteNote(selectedNote!!.id)
+                                selectedNote = null
+                            }) {
+                                Icon(Icons.Rounded.Delete, contentDescription = "Delete", tint = DangerRose)
+                            }
+                            IconButton(onClick = { selectedNote = null }) {
+                                Icon(Icons.Rounded.Close, contentDescription = "Close", tint = LocalTextSecondary.current)
+                            }
                         }
                     }
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         selectedNote!!.content,
-                        color = TextSecondary,
+                        color = LocalTextSecondary.current,
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         selectedNote!!.date,
-                        color = PrimaryIndigo,
+                        color = LocalAccentColor.current,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.align(Alignment.End)
@@ -1459,77 +1614,94 @@ fun GeneralNotes(notes: List<Note>, onAddNote: () -> Unit) {
 fun NoteCard(note: Note, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Surface(
         modifier = modifier
-            .height(160.dp)
+            .fillMaxWidth()
+            .wrapContentHeight()
             .clickable { onClick() },
         shape = RoundedCornerShape(24.dp),
-        color = SurfaceColor,
+        color = LocalSurfaceColor.current,
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.03f))
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(note.title, color = TextPrimary, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(
+                note.title,
+                color = LocalTextPrimary.current,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                fontSize = 16.sp
+            )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 note.content,
-                color = TextSecondary,
-                fontSize = 12.sp,
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis
+                color = LocalTextSecondary.current,
+                fontSize = 13.sp,
+                maxLines = 8,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 18.sp
             )
-            Spacer(modifier = Modifier.weight(1f))
-            Text(note.date, color = PrimaryIndigo, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                note.date,
+                color = LocalAccentColor.current,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
 // --- END NOTES SECTION ---
 
 @Composable
-fun NewNoteDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
-    var title by remember { mutableStateOf("") }
-    var content by remember { mutableStateOf("") }
+fun NewNoteDialog(
+    initialNote: Note? = null,
+    onDismiss: () -> Unit,
+    onSave: (String, String) -> Unit
+) {
+    var title by remember { mutableStateOf(initialNote?.title ?: "") }
+    var content by remember { mutableStateOf(initialNote?.content ?: "") }
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
                 .wrapContentHeight(),
             shape = RoundedCornerShape(28.dp),
-            color = SurfaceColor
+            color = LocalSurfaceColor.current
         ) {
             Column(
                 modifier = Modifier.padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Text(
-                    "New Note",
-                    color = TextPrimary,
+                    if (initialNote != null) "Edit Note" else "New Note",
+                    color = LocalTextPrimary.current,
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold
                 )
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    placeholder = { Text("Title", color = TextSecondary.copy(alpha = 0.5f)) },
+                    placeholder = { Text("Title", color = LocalTextSecondary.current.copy(alpha = 0.5f)) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = PrimaryIndigo,
-                        unfocusedBorderColor = BgColor,
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary
+                        focusedBorderColor = LocalAccentColor.current,
+                        unfocusedBorderColor = LocalBgColor.current,
+                        focusedTextColor = LocalTextPrimary.current,
+                        unfocusedTextColor = LocalTextPrimary.current
                     )
                 )
                 OutlinedTextField(
                     value = content,
                     onValueChange = { content = it },
-                    placeholder = { Text("Note content", color = TextSecondary.copy(alpha = 0.5f)) },
+                    placeholder = { Text("Note content", color = LocalTextSecondary.current.copy(alpha = 0.5f)) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(150.dp),
                     shape = RoundedCornerShape(12.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = PrimaryIndigo,
-                        unfocusedBorderColor = BgColor,
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary
+                        focusedBorderColor = LocalAccentColor.current,
+                        unfocusedBorderColor = LocalBgColor.current,
+                        focusedTextColor = LocalTextPrimary.current,
+                        unfocusedTextColor = LocalTextPrimary.current
                     )
                 )
                 Row(
@@ -1538,19 +1710,19 @@ fun NewNoteDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(onClick = onDismiss) {
-                        Text("Cancel", color = PrimaryIndigo, fontWeight = FontWeight.Bold)
+                        Text("Cancel", color = LocalAccentColor.current, fontWeight = FontWeight.Bold)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
                         onClick = { if (title.isNotBlank()) onSave(title, content) },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = PrimaryIndigo.copy(
+                            containerColor = LocalAccentColor.current.copy(
                                 alpha = if (title.isBlank()) 0.3f else 1f
                             )
                         ),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text("Save", color = Color.White)
+                        Text(if (initialNote != null) "Update" else "Save", color = Color.White)
                     }
                 }
             }
@@ -1561,7 +1733,29 @@ fun NewNoteDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
 // --- UPDATED PRODUCTIVITY TOOLS ---
 @Composable
 fun ProductivityTools() {
+    val context = LocalContext.current
+    var service by remember { mutableStateOf<ProductivityService?>(null) }
+
+    DisposableEffect(Unit) {
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, iBinder: IBinder?) {
+                val binder = iBinder as ProductivityService.ProductivityBinder
+                service = binder.getService()
+            }
+            override fun onServiceDisconnected(name: ComponentName?) {
+                service = null
+            }
+        }
+        val intent = Intent(context, ProductivityService::class.java)
+        context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        onDispose {
+            context.unbindService(connection)
+        }
+    }
+
     var selectedTool by remember { mutableIntStateOf(0) } // 0: Pomodoro, 1: Timer, 2: Stopwatch
+    
+    // UI state synchronized with service
     var timerTime by remember { mutableLongStateOf(10 * 60 * 1000L) }
     var maxTimerTime by remember { mutableLongStateOf(10 * 60 * 1000L) }
     var isTimerRunning by remember { mutableStateOf(false) }
@@ -1575,13 +1769,23 @@ fun ProductivityTools() {
     // Manual timer input
     var manualMinutes by remember { mutableStateOf("10") }
 
-    LaunchedEffect(isTimerRunning, isPomoRunning, isStopWatchRunning, selectedTool) {
+    LaunchedEffect(service, selectedTool) {
+        service?.selectedTool = selectedTool
         while (true) {
-            delay(100.milliseconds)
-            when (selectedTool) {
-                0 -> if (isPomoRunning && pomoTime > 0) pomoTime -= 100
-                1 -> if (isTimerRunning && timerTime > 0) timerTime -= 100
-                2 -> if (isStopWatchRunning) stopWatchTime += 100
+            delay(100)
+            service?.let { s ->
+                timerTime = s.timerTime
+                maxTimerTime = s.maxTimerTime
+                isTimerRunning = s.isTimerRunning
+                pomoTime = s.pomoTime
+                isPomoRunning = s.isPomoRunning
+                pomoStage = s.pomoStage
+                stopWatchTime = s.stopwatchTime
+                isStopWatchRunning = s.isStopwatchRunning
+                if (laps.size != s.laps.size) {
+                    laps.clear()
+                    laps.addAll(s.laps)
+                }
             }
         }
     }
@@ -1598,7 +1802,7 @@ fun ProductivityTools() {
                 .fillMaxWidth()
                 .height(48.dp),
             shape = RoundedCornerShape(24.dp),
-            color = SurfaceColor
+            color = LocalSurfaceColor.current
         ) {
             Row(modifier = Modifier.padding(4.dp)) {
                 listOf("Pomodoro", "Timer", "Stopwatch").forEachIndexed { index, title ->
@@ -1608,13 +1812,13 @@ fun ProductivityTools() {
                             .weight(1f)
                             .fillMaxHeight()
                             .clip(CircleShape)
-                            .background(if (isSelected) PrimaryIndigo else Color.Transparent)
+                            .background(if (isSelected) LocalAccentColor.current else Color.Transparent)
                             .clickable { selectedTool = index },
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             title,
-                            color = if (isSelected) Color.White else TextSecondary,
+                            color = if (isSelected) Color.White else LocalTextSecondary.current,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )
@@ -1630,34 +1834,34 @@ fun ProductivityTools() {
                 pomoTime,
                 isPomoRunning,
                 pomoStage,
-                onToggle = { isPomoRunning = !isPomoRunning },
+                onToggle = { 
+                    val action = if (isPomoRunning) "PAUSE_POMO" else "START_POMO"
+                    context.startService(Intent(context, ProductivityService::class.java).apply { this.action = action })
+                },
                 onReset = {
-                    pomoTime = 25 * 60 * 1000L
-                    isPomoRunning = false
-                    pomoStage = "Focus"
+                    context.startService(Intent(context, ProductivityService::class.java).apply { action = "RESET_POMO" })
                 },
                 onStageChange = { stage, time ->
-                    pomoStage = stage
-                    pomoTime = time
-                    isPomoRunning = false
+                    service?.pomoStage = stage
+                    service?.pomoTime = time
+                    context.startService(Intent(context, ProductivityService::class.java).apply { action = "PAUSE_POMO" })
                 }
             )
             1 -> TimerUI(
                 timerTime,
                 maxTimerTime,
                 isTimerRunning,
-                onToggle = { isTimerRunning = !isTimerRunning },
+                onToggle = { 
+                    val action = if (isTimerRunning) "PAUSE_TIMER" else "START_TIMER"
+                    context.startService(Intent(context, ProductivityService::class.java).apply { this.action = action })
+                },
                 onReset = {
-                    timerTime = 10 * 60 * 1000L
-                    maxTimerTime = 10 * 60 * 1000L
-                    isTimerRunning = false
-                    manualMinutes = "10"
+                    context.startService(Intent(context, ProductivityService::class.java).apply { action = "RESET_TIMER" })
                 },
                 onSetTime = { newTime ->
-                    timerTime = newTime
-                    maxTimerTime = newTime
-                    isTimerRunning = false
-                    manualMinutes = (newTime / 60000).toString()
+                    service?.timerTime = newTime
+                    service?.maxTimerTime = newTime
+                    context.startService(Intent(context, ProductivityService::class.java).apply { action = "PAUSE_TIMER" })
                 },
                 manualMinutes = manualMinutes,
                 onManualMinutesChange = { manualMinutes = it }
@@ -1666,13 +1870,16 @@ fun ProductivityTools() {
                 stopWatchTime,
                 isStopWatchRunning,
                 laps,
-                onToggle = { isStopWatchRunning = !isStopWatchRunning },
-                onReset = {
-                    stopWatchTime = 0L
-                    isStopWatchRunning = false
-                    laps.clear()
+                onToggle = { 
+                    val action = if (isStopWatchRunning) "PAUSE_STOPWATCH" else "START_STOPWATCH"
+                    context.startService(Intent(context, ProductivityService::class.java).apply { this.action = action })
                 },
-                onLap = { laps.add(0, stopWatchTime) }
+                onReset = {
+                    context.startService(Intent(context, ProductivityService::class.java).apply { action = "RESET_STOPWATCH" })
+                },
+                onLap = { 
+                    service?.laps?.add(0, stopWatchTime)
+                }
             )
         }
     }
@@ -1710,12 +1917,15 @@ fun TimerUI(
         label = "pulse"
     )
 
+    val accent = LocalAccentColor.current
+    val surface = LocalSurfaceColor.current
+
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.scale(pulse)) {
             Canvas(modifier = Modifier.size(260.dp)) {
-                drawCircle(color = SurfaceColor, style = Stroke(12.dp.toPx()))
+                drawCircle(color = surface, style = Stroke(12.dp.toPx()))
                 drawArc(
-                    brush = Brush.sweepGradient(listOf(PrimaryIndigo.copy(0.5f), PrimaryIndigo)),
+                    brush = Brush.sweepGradient(listOf(accent.copy(0.5f), accent)),
                     startAngle = -90f,
                     sweepAngle = animatedSweep,
                     useCenter = false,
@@ -1728,7 +1938,7 @@ fun TimerUI(
                     fontSize = 52.sp,
                     fontWeight = FontWeight.Light
                 ),
-                color = TextPrimary
+                color = LocalTextPrimary.current
             )
         }
         Spacer(modifier = Modifier.height(30.dp))
@@ -1744,20 +1954,20 @@ fun TimerUI(
                 onValueChange = { onManualMinutesChange(it) },
                 modifier = Modifier.width(80.dp),
                 textStyle = MaterialTheme.typography.bodyLarge.copy(
-                    color = TextPrimary,
+                    color = LocalTextPrimary.current,
                     textAlign = TextAlign.Center
                 ),
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = PrimaryIndigo,
-                    unfocusedBorderColor = SurfaceColor,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary
+                    focusedBorderColor = accent,
+                    unfocusedBorderColor = surface,
+                    focusedTextColor = LocalTextPrimary.current,
+                    unfocusedTextColor = LocalTextPrimary.current
                 )
             )
             Spacer(modifier = Modifier.width(8.dp))
-            Text("min", color = TextSecondary, fontSize = 14.sp)
+            Text("min", color = LocalTextSecondary.current, fontSize = 14.sp)
             Spacer(modifier = Modifier.width(16.dp))
             Button(
                 onClick = {
@@ -1765,7 +1975,7 @@ fun TimerUI(
                     if (mins > 0) onSetTime(mins * 60 * 1000L)
                 },
                 shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo)
+                colors = ButtonDefaults.buttonColors(containerColor = accent)
             ) {
                 Text("Set", color = Color.White)
             }
@@ -1779,8 +1989,8 @@ fun TimerUI(
                     onClick = { onSetTime(mins * 60 * 1000L) },
                     label = { Text("${mins}m") },
                     colors = FilterChipDefaults.filterChipColors(
-                        containerColor = SurfaceColor,
-                        labelColor = TextSecondary
+                        containerColor = surface,
+                        labelColor = LocalTextSecondary.current
                     ),
                     shape = CircleShape
                 )
@@ -1825,6 +2035,8 @@ fun PomodoroUI(
         label = "glow"
     )
 
+    val surface = LocalSurfaceColor.current
+
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PomodoroChip("Focus", stage == "Focus") {
@@ -1840,7 +2052,7 @@ fun PomodoroUI(
         Spacer(modifier = Modifier.height(40.dp))
         Box(contentAlignment = Alignment.Center) {
             Canvas(modifier = Modifier.size(260.dp)) {
-                drawCircle(color = SurfaceColor, style = Stroke(8.dp.toPx()))
+                drawCircle(color = surface, style = Stroke(8.dp.toPx()))
                 // Neon Glow Effect
                 drawCircle(
                     color = SuccessEmerald.copy(alpha = glowAlpha * 0.2f),
@@ -1861,7 +2073,7 @@ fun PomodoroUI(
                         fontSize = 64.sp,
                         fontWeight = FontWeight.Bold
                     ),
-                    color = TextPrimary
+                    color = LocalTextPrimary.current
                 )
                 Text(
                     text = stage.uppercase(),
@@ -1884,12 +2096,12 @@ fun PomodoroChip(label: String, isSelected: Boolean, onClick: () -> Unit) {
             .height(36.dp)
             .clickable { onClick() },
         shape = CircleShape,
-        color = if (isSelected) SuccessEmerald else SurfaceColor
+        color = if (isSelected) SuccessEmerald else LocalSurfaceColor.current
     ) {
         Box(modifier = Modifier.padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
             Text(
                 label,
-                color = if (isSelected) Color.White else TextSecondary,
+                color = if (isSelected) Color.White else LocalTextSecondary.current,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -1911,6 +2123,11 @@ fun StopwatchUI(
     val s = (time / 1000) % 60
     val ms = (time % 1000) / 10
 
+    val surface = LocalSurfaceColor.current
+    val accent = LocalAccentColor.current
+    val textPrimary = LocalTextPrimary.current
+    val textSecondary = LocalTextSecondary.current
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.fillMaxWidth()
@@ -1922,7 +2139,7 @@ fun StopwatchUI(
                 fontWeight = FontWeight.Black,
                 letterSpacing = (-1).sp
             ),
-            color = TextPrimary
+            color = textPrimary
         )
         Spacer(modifier = Modifier.height(40.dp))
         Row(
@@ -1934,14 +2151,14 @@ fun StopwatchUI(
                 onClick = onReset,
                 modifier = Modifier
                     .size(56.dp)
-                    .background(SurfaceColor, CircleShape)
+                    .background(surface, CircleShape)
             ) {
-                Icon(Icons.Rounded.Refresh, null, tint = TextPrimary)
+                Icon(Icons.Rounded.Refresh, null, tint = textPrimary)
             }
             Surface(
                 modifier = Modifier.size(80.dp),
                 shape = CircleShape,
-                color = if (isRunning) SuccessEmerald else PrimaryIndigo,
+                color = if (isRunning) SuccessEmerald else accent,
                 onClick = onToggle
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -1958,12 +2175,12 @@ fun StopwatchUI(
                 enabled = isRunning,
                 modifier = Modifier
                     .size(56.dp)
-                    .background(if (isRunning) SurfaceColor else SurfaceColor.copy(0.3f), CircleShape)
+                    .background(if (isRunning) surface else surface.copy(0.3f), CircleShape)
             ) {
                 Icon(
                     Icons.Rounded.Timer,
                     null,
-                    tint = if (isRunning) TextPrimary else TextSecondary
+                    tint = if (isRunning) textPrimary else textSecondary
                 )
             }
         }
@@ -1981,7 +2198,7 @@ fun StopwatchUI(
                         .padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Lap ${laps.size - index}", color = TextSecondary)
+                    Text("Lap ${laps.size - index}", color = textSecondary)
                     Text(
                         String.format(
                             Locale.getDefault(),
@@ -1990,7 +2207,7 @@ fun StopwatchUI(
                             (lapTime / 1000) % 60,
                             (lapTime % 1000) / 10
                         ),
-                        color = TextPrimary,
+                        color = textPrimary,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -2002,6 +2219,8 @@ fun StopwatchUI(
 
 @Composable
 fun TimerControls(isRunning: Boolean, onToggle: () -> Unit, onReset: () -> Unit) {
+    val surface = LocalSurfaceColor.current
+    val accent = LocalAccentColor.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Center,
@@ -2011,15 +2230,15 @@ fun TimerControls(isRunning: Boolean, onToggle: () -> Unit, onReset: () -> Unit)
             onClick = onReset,
             modifier = Modifier
                 .size(56.dp)
-                .background(SurfaceColor, CircleShape)
+                .background(surface, CircleShape)
         ) {
-            Icon(Icons.Rounded.Refresh, null, tint = TextPrimary)
+            Icon(Icons.Rounded.Refresh, null, tint = LocalTextPrimary.current)
         }
         Spacer(modifier = Modifier.width(40.dp))
         Surface(
             modifier = Modifier.size(80.dp),
             shape = CircleShape,
-            color = if (isRunning) SuccessEmerald else PrimaryIndigo,
+            color = if (isRunning) SuccessEmerald else accent,
             onClick = onToggle
         ) {
             Box(contentAlignment = Alignment.Center) {
@@ -2036,270 +2255,198 @@ fun TimerControls(isRunning: Boolean, onToggle: () -> Unit, onReset: () -> Unit)
 // --- END PRODUCTIVITY TOOLS ---
 
 @Composable
-fun UniversalProfile(name: String, bio: String, onUpdateProfile: (String, String) -> Unit) {
-    var isEditing by remember { mutableStateOf(false) }
-    var tempName by remember { mutableStateOf(name) }
-    var tempBio by remember { mutableStateOf(bio) }
-    Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            item { Spacer(modifier = Modifier.height(72.dp)) }
-            item {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Surface(
-                            modifier = Modifier.size(110.dp),
-                            shape = CircleShape,
-                            color = PrimaryIndigo.copy(alpha = 0.15f),
-                            border = BorderStroke(2.dp, PrimaryIndigo)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
+fun UniversalProfile(
+    name: String,
+    bio: String,
+    photoUri: String?,
+    currentTheme: Int,
+    currentAccent: Color,
+    onUpdateProfile: (String, String, String?) -> Unit,
+    onUpdateAppearance: (Int, Color) -> Unit
+) {
+    var currentSubScreen by remember { mutableStateOf<ProfileSubScreen?>(null) }
+    var isEditingProfile by remember { mutableStateOf(false) }
+
+    AnimatedContent(
+        targetState = currentSubScreen,
+        transitionSpec = {
+            if (targetState != null) {
+                slideInHorizontally { it } + fadeIn() togetherWith slideOutHorizontally { -it } + fadeOut()
+            } else {
+                slideInHorizontally { -it } + fadeIn() togetherWith slideOutHorizontally { it } + fadeOut()
+            }
+        },
+        label = "ProfileNavigation"
+    ) { subScreen ->
+        if (subScreen == null) {
+            ProfileMain(
+                name = name,
+                bio = bio,
+                photoUri = photoUri,
+                onEditProfile = { isEditingProfile = true },
+                onNavigate = { currentSubScreen = it }
+            )
+        } else {
+            when (subScreen) {
+                ProfileSubScreen.PERSONAL -> PersonalDetailsScreen(
+                    name = name,
+                    bio = bio,
+                    onBack = { currentSubScreen = null },
+                    onSave = { n, b -> onUpdateProfile(n, b, photoUri) }
+                )
+                ProfileSubScreen.NOTIFICATIONS -> NotificationsSettingsScreen(onBack = { currentSubScreen = null })
+                ProfileSubScreen.APPEARANCE -> AppearanceSettingsScreen(
+                    currentTheme = currentTheme,
+                    currentAccent = currentAccent,
+                    onBack = { currentSubScreen = null },
+                    onUpdate = onUpdateAppearance
+                )
+                ProfileSubScreen.TERMS -> TermsPrivacyScreen(onBack = { currentSubScreen = null })
+                ProfileSubScreen.HELP -> HelpSupportScreen(onBack = { currentSubScreen = null })
+            }
+        }
+    }
+
+    if (isEditingProfile) {
+        EditProfileOverlay(
+            initialName = name,
+            initialBio = bio,
+            initialPhotoUri = photoUri,
+            onDismiss = { isEditingProfile = false },
+            onSave = { n, b, p ->
+                onUpdateProfile(n, b, p)
+                isEditingProfile = false
+            }
+        )
+    }
+}
+
+enum class ProfileSubScreen {
+    PERSONAL, NOTIFICATIONS, APPEARANCE, TERMS, HELP
+}
+
+@Composable
+fun ProfileMain(
+    name: String,
+    bio: String,
+    photoUri: String?,
+    onEditProfile: () -> Unit,
+    onNavigate: (ProfileSubScreen) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item { Spacer(modifier = Modifier.height(72.dp)) }
+        item {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(contentAlignment = Alignment.Center) {
+                    val accent = LocalAccentColor.current
+                    Surface(
+                        modifier = Modifier.size(110.dp),
+                        shape = CircleShape,
+                        color = accent.copy(alpha = 0.15f),
+                        border = BorderStroke(2.dp, accent)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            if (photoUri != null) {
+                                AsyncImage(
+                                    model = photoUri,
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize().clip(CircleShape),
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                )
+                            } else {
                                 Icon(
                                     Icons.Rounded.Person,
                                     contentDescription = null,
                                     modifier = Modifier.size(64.dp),
-                                    tint = PrimaryIndigo
+                                    tint = accent
                                 )
                             }
                         }
                     }
-                    Spacer(modifier = Modifier.height(20.dp))
-                    Text(
-                        text = name,
-                        color = TextPrimary,
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = bio,
-                        color = SuccessEmerald,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Surface(
-                        modifier = Modifier
-                            .width(160.dp)
-                            .height(48.dp)
-                            .clickable {
-                                tempName = name
-                                tempBio = bio
-                                isEditing = true
-                            },
-                        shape = RoundedCornerShape(16.dp),
-                        color = PrimaryIndigo,
-                        shadowElevation = 8.dp
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                Icons.Rounded.AutoFixHigh,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                "Edit Profile",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
-                            )
-                        }
-                    }
                 }
-            }
-            item { Spacer(modifier = Modifier.height(24.dp)) }
-            item {
+                Spacer(modifier = Modifier.height(20.dp))
                 Text(
-                    "PREFERENCES",
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 8.dp, bottom = 4.dp)
+                    text = name,
+                    color = TextPrimary,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold
                 )
-            }
-            item { ProfileOption("Personal Details", Icons.Rounded.Badge) }
-            item { ProfileOption("Notifications", Icons.Rounded.NotificationsActive) }
-            item { ProfileOption("Appearance", Icons.Rounded.Palette) }
-            item { Spacer(modifier = Modifier.height(12.dp)) }
-            item {
                 Text(
-                    "SUPPORT",
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 8.dp, bottom = 4.dp)
+                    text = bio,
+                    color = SuccessEmerald,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium
                 )
-            }
-            item { ProfileOption("Terms & Privacy", Icons.Rounded.Policy) }
-            item { ProfileOption("Help & Support", Icons.Rounded.SupportAgent) }
-            item { Spacer(modifier = Modifier.height(24.dp)) }
-            item {
-                Text(
-                    "Version 3.0.0",
-                    color = TextSecondary.copy(alpha = 0.5f),
-                    fontSize = 11.sp
-                )
-            }
-            item { Spacer(modifier = Modifier.height(110.dp)) }
-        }
-        AnimatedVisibility(
-            visible = isEditing,
-            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-        ) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .imePadding(),
-                color = BgColor.copy(alpha = 0.98f)
-            ) {
-                LazyColumn(
+                Spacer(modifier = Modifier.height(24.dp))
+                Button(
+                    onClick = onEditProfile,
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                        .width(180.dp)
+                        .height(48.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = LocalAccentColor.current),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 8.dp)
                 ) {
-                    item { Spacer(modifier = Modifier.height(24.dp)) }
-                    item {
-                        Text(
-                            "Update Identity",
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = TextPrimary,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    item { Spacer(modifier = Modifier.height(16.dp)) }
-                    item {
-                        Box(contentAlignment = Alignment.BottomEnd) {
-                            Surface(
-                                modifier = Modifier.size(120.dp),
-                                shape = CircleShape,
-                                color = PrimaryIndigo.copy(alpha = 0.1f)
-                            ) {
-                                Icon(
-                                    Icons.Rounded.Person,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(72.dp),
-                                    tint = PrimaryIndigo
-                                )
-                            }
-                            Surface(
-                                modifier = Modifier.size(36.dp),
-                                shape = CircleShape,
-                                color = PrimaryIndigo,
-                                border = BorderStroke(2.dp, BgColor)
-                            ) {
-                                IconButton(onClick = {}) {
-                                    Icon(
-                                        Icons.Rounded.CameraAlt,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    item { Spacer(modifier = Modifier.height(24.dp)) }
-                    item {
-                        OutlinedTextField(
-                            value = tempName,
-                            onValueChange = { tempName = it },
-                            label = { Text("Full Name") },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = PrimaryIndigo,
-                                unfocusedBorderColor = SurfaceColor,
-                                focusedLabelColor = PrimaryIndigo,
-                                unfocusedLabelColor = TextSecondary,
-                                cursorColor = PrimaryIndigo,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
-                            )
-                        )
-                    }
-                    item {
-                        OutlinedTextField(
-                            value = tempBio,
-                            onValueChange = { tempBio = it },
-                            label = { Text("Bio / Status") },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = PrimaryIndigo,
-                                unfocusedBorderColor = SurfaceColor,
-                                focusedLabelColor = PrimaryIndigo,
-                                unfocusedLabelColor = TextSecondary,
-                                cursorColor = PrimaryIndigo,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
-                            )
-                        )
-                    }
-                    item { Spacer(modifier = Modifier.height(24.dp)) }
-                    item {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = { isEditing = false },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(56.dp),
-                                shape = RoundedCornerShape(16.dp),
-                                border = BorderStroke(1.dp, SurfaceColor)
-                            ) {
-                                Text("Cancel", color = TextPrimary)
-                            }
-                            Button(
-                                onClick = {
-                                    onUpdateProfile(tempName, tempBio)
-                                    isEditing = false
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(56.dp),
-                                shape = RoundedCornerShape(16.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo)
-                            ) {
-                                Text("Save", color = Color.White)
-                            }
-                        }
-                    }
-                    item { Spacer(modifier = Modifier.height(110.dp)) }
+                    Icon(Icons.Rounded.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text("Edit Profile", fontWeight = FontWeight.Bold)
                 }
             }
         }
+        item { Spacer(modifier = Modifier.height(32.dp)) }
+        item {
+            SectionHeader("PREFERENCES")
+        }
+        item { ProfileOption("Personal Details", Icons.Rounded.Badge) { onNavigate(ProfileSubScreen.PERSONAL) } }
+        item { ProfileOption("Notifications", Icons.Rounded.NotificationsActive) { onNavigate(ProfileSubScreen.NOTIFICATIONS) } }
+        item { ProfileOption("Appearance", Icons.Rounded.Palette) { onNavigate(ProfileSubScreen.APPEARANCE) } }
+        item { Spacer(modifier = Modifier.height(12.dp)) }
+        item {
+            SectionHeader("SUPPORT")
+        }
+        item { ProfileOption("Terms & Privacy", Icons.Rounded.Policy) { onNavigate(ProfileSubScreen.TERMS) } }
+        item { ProfileOption("Help & Support", Icons.Rounded.SupportAgent) { onNavigate(ProfileSubScreen.HELP) } }
+        item { Spacer(modifier = Modifier.height(24.dp)) }
+        item {
+            Text(
+                "Version 3.1.0",
+                color = LocalTextSecondary.current.copy(alpha = 0.5f),
+                fontSize = 11.sp
+            )
+        }
+        item { Spacer(modifier = Modifier.height(110.dp)) }
     }
 }
 
 @Composable
-fun ProfileOption(label: String, icon: ImageVector) {
+fun SectionHeader(title: String) {
+    Text(
+        title,
+        color = TextSecondary,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 8.dp, bottom = 4.dp)
+    )
+}
+
+@Composable
+fun ProfileOption(label: String, icon: ImageVector, onClick: () -> Unit) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .height(68.dp)
-            .clickable { /* action */ },
+            .clickable { onClick() },
         shape = RoundedCornerShape(20.dp),
-        color = SurfaceColor.copy(alpha = 0.6f),
+        color = LocalSurfaceColor.current.copy(alpha = 0.6f),
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.03f))
     ) {
         Row(
@@ -2309,13 +2456,13 @@ fun ProfileOption(label: String, icon: ImageVector) {
             Surface(
                 modifier = Modifier.size(40.dp),
                 shape = RoundedCornerShape(12.dp),
-                color = PrimaryIndigo.copy(alpha = 0.1f)
+                color = LocalAccentColor.current.copy(alpha = 0.1f)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         icon,
                         contentDescription = null,
-                        tint = PrimaryIndigo,
+                        tint = LocalAccentColor.current,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -2323,7 +2470,7 @@ fun ProfileOption(label: String, icon: ImageVector) {
             Spacer(modifier = Modifier.width(16.dp))
             Text(
                 label,
-                color = TextPrimary,
+                color = LocalTextPrimary.current,
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.weight(1f)
@@ -2331,9 +2478,407 @@ fun ProfileOption(label: String, icon: ImageVector) {
             Icon(
                 Icons.Rounded.ChevronRight,
                 contentDescription = null,
-                tint = TextSecondary.copy(alpha = 0.5f),
+                tint = LocalTextSecondary.current.copy(alpha = 0.5f),
                 modifier = Modifier.size(20.dp)
             )
+        }
+    }
+}
+
+@Composable
+fun SubScreenScaffold(
+    title: String,
+    onBack: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(LocalBgColor.current)
+            .padding(horizontal = 24.dp)
+    ) {
+        Spacer(modifier = Modifier.height(64.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back", tint = LocalTextPrimary.current)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.headlineMedium,
+                color = LocalTextPrimary.current,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.height(32.dp))
+        content()
+    }
+}
+
+@Composable
+fun PersonalDetailsScreen(name: String, bio: String, onBack: () -> Unit, onSave: (String, String) -> Unit) {
+    var tempName by remember { mutableStateOf(name) }
+    var tempBio by remember { mutableStateOf(bio) }
+
+    SubScreenScaffold("Personal Details", onBack) {
+        Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            ProfileInputField("Full Name", tempName) { tempName = it }
+            ProfileInputField("Bio / Status", tempBio) { tempBio = it }
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            Button(
+                onClick = { onSave(tempName, tempBio); onBack() },
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = LocalAccentColor.current)
+            ) {
+                Text("Save Changes", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+fun ProfileInputField(label: String, value: String, onValueChange: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(label, color = TextSecondary, fontSize = 14.sp)
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = LocalAccentColor.current,
+                unfocusedBorderColor = LocalSurfaceColor.current,
+                focusedTextColor = LocalTextPrimary.current,
+                unfocusedTextColor = LocalTextPrimary.current
+            )
+        )
+    }
+}
+
+@Composable
+fun NotificationsSettingsScreen(onBack: () -> Unit) {
+    var remindersEnabled by remember { mutableStateOf(true) }
+    var focusEnabled by remember { mutableStateOf(true) }
+    var soundEnabled by remember { mutableStateOf(false) }
+
+    SubScreenScaffold("Notifications", onBack) {
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            SettingSwitchRow("Reminders", "Get notified for your tasks", remindersEnabled) { remindersEnabled = it }
+            SettingSwitchRow("Focus Mode", "Alerts when session ends", focusEnabled) { focusEnabled = it }
+            SettingSwitchRow("Sound & Vibration", "Alert with sound", soundEnabled) { soundEnabled = it }
+        }
+    }
+}
+
+@Composable
+fun SettingSwitchRow(title: String, subtitle: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = LocalSurfaceColor.current.copy(alpha = 0.4f)
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, color = LocalTextPrimary.current, fontWeight = FontWeight.Bold)
+                Text(subtitle, color = LocalTextSecondary.current, fontSize = 12.sp)
+            }
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = SwitchDefaults.colors(checkedThumbColor = SuccessEmerald)
+            )
+        }
+    }
+}
+
+@Composable
+fun AppearanceSettingsScreen(
+    currentTheme: Int,
+    currentAccent: Color,
+    onBack: () -> Unit,
+    onUpdate: (Int, Color) -> Unit
+) {
+    var selectedTheme by remember { mutableIntStateOf(currentTheme) }
+    var selectedAccent by remember { mutableStateOf(currentAccent) }
+
+    val accentColors = listOf(
+        Color(0xFF6366F1), Color(0xFF10B981), Color(0xFFF59E0B), Color(0xFFF43F5E),
+        Color(0xFF8B5CF6), Color(0xFFEC4899), Color(0xFF06B6D4)
+    )
+
+    SubScreenScaffold("Appearance", onBack) {
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(28.dp)
+        ) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text("THEME MODE", color = LocalTextSecondary.current, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        ThemeCard("Dark", Icons.Rounded.DarkMode, selectedTheme == 0, Modifier.weight(1f)) { 
+                            selectedTheme = 0
+                            onUpdate(0, selectedAccent)
+                        }
+                        ThemeCard("Light", Icons.Rounded.LightMode, selectedTheme == 1, Modifier.weight(1f)) { 
+                            selectedTheme = 1
+                            onUpdate(1, selectedAccent)
+                        }
+                        ThemeCard("System", Icons.Rounded.SettingsBrightness, selectedTheme == 2, Modifier.weight(1f)) { 
+                            selectedTheme = 2
+                            onUpdate(2, selectedAccent)
+                        }
+                    }
+                }
+            }
+
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text("ACCENT COLOR", color = LocalTextSecondary.current, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(horizontal = 4.dp)) {
+                        items(accentColors) { color ->
+                            val isSelected = selectedAccent == color
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(color)
+                                    .clickable { 
+                                        selectedAccent = color
+                                        onUpdate(selectedTheme, color)
+                                    }
+                                    .border(
+                                        width = if (isSelected) 3.dp else 0.dp,
+                                        color = if (isSelected) Color.White else Color.Transparent,
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isSelected) Icon(Icons.Rounded.Check, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text("PREVIEW", color = LocalTextSecondary.current, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(24.dp),
+                        color = LocalSurfaceColor.current.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, Color.White.copy(0.05f))
+                    ) {
+                        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(modifier = Modifier.size(40.dp).background(selectedAccent.copy(0.1f), CircleShape), contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Rounded.Notifications, null, tint = selectedAccent, modifier = Modifier.size(20.dp))
+                                }
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text("Sample Task", color = LocalTextPrimary.current, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                    Text("Today • 10:00 AM", color = LocalTextSecondary.current, fontSize = 12.sp)
+                                }
+                                Spacer(modifier = Modifier.weight(1f))
+                                Switch(checked = true, onCheckedChange = {}, colors = SwitchDefaults.colors(checkedThumbColor = selectedAccent, checkedTrackColor = selectedAccent.copy(0.3f)))
+                            }
+                            Button(
+                                onClick = {},
+                                modifier = Modifier.fillMaxWidth().height(48.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = selectedAccent)
+                            ) {
+                                Text("Primary Action", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Button(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth().height(56.dp).padding(vertical = 8.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = selectedAccent)
+        ) {
+            Text("Done", fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+fun ThemeCard(label: String, icon: ImageVector, isSelected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    Surface(
+        modifier = modifier.height(110.dp).clickable { onClick() },
+        shape = RoundedCornerShape(20.dp),
+        color = if (isSelected) LocalAccentColor.current else LocalSurfaceColor.current,
+        border = if (isSelected) null else BorderStroke(1.dp, Color.White.copy(0.05f))
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(12.dp)
+        ) {
+            Icon(icon, null, tint = if (isSelected) Color.White else LocalTextSecondary.current, modifier = Modifier.size(28.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(label, color = if (isSelected) Color.White else LocalTextSecondary.current, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        }
+    }
+}
+
+@Composable
+fun TermsPrivacyScreen(onBack: () -> Unit) {
+    SubScreenScaffold("Terms & Privacy", onBack) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            item {
+                Text(
+                    "This application respects your privacy. All your data (Reminders, Notes, Profile) is stored locally on your device and is not shared with any third-party servers.",
+                    color = TextSecondary,
+                    lineHeight = 24.sp
+                )
+            }
+            item {
+                Text("Terms of Service", color = TextPrimary, fontWeight = FontWeight.Bold)
+                Text(
+                    "By using Reminder Pro, you agree to local data management and responsible use of notification features.",
+                    color = TextSecondary
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun HelpSupportScreen(onBack: () -> Unit) {
+    SubScreenScaffold("Help & Support", onBack) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            item {
+                Text(
+                    "Need assistance? We're here to help you get the most out of Reminder Pro.",
+                    color = LocalTextSecondary.current,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+            item { ProfileOption("Email Support", Icons.Rounded.Email) { /* action */ } }
+            item { ProfileOption("Frequently Asked Questions", Icons.Rounded.QuestionMark) { /* action */ } }
+            item { ProfileOption("Video Tutorials", Icons.Rounded.PlayCircle) { /* action */ } }
+            item { ProfileOption("User Community", Icons.Rounded.Groups) { /* action */ } }
+            
+            item { Spacer(modifier = Modifier.height(24.dp)) }
+            
+            item {
+                Text("SYSTEM STATUS", color = LocalTextSecondary.current, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            }
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    color = LocalSurfaceColor.current.copy(alpha = 0.4f),
+                    border = BorderStroke(1.dp, Color.White.copy(0.03f))
+                ) {
+                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.size(10.dp).background(SuccessEmerald, CircleShape))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("All Systems Operational", color = LocalTextPrimary.current, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EditProfileOverlay(
+    initialName: String,
+    initialBio: String,
+    initialPhotoUri: String?,
+    onDismiss: () -> Unit,
+    onSave: (String, String, String?) -> Unit
+) {
+    var tempName by remember { mutableStateOf(initialName) }
+    var tempBio by remember { mutableStateOf(initialBio) }
+    var tempPhotoUri by remember { mutableStateOf(initialPhotoUri) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) tempPhotoUri = uri.toString()
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize().imePadding(),
+        color = LocalBgColor.current.copy(alpha = 0.98f)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Spacer(modifier = Modifier.height(24.dp))
+            Text("Update Identity", style = MaterialTheme.typography.headlineMedium, color = LocalTextPrimary.current, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            Box(contentAlignment = Alignment.BottomEnd) {
+                val accent = LocalAccentColor.current
+                Surface(modifier = Modifier.size(120.dp), shape = CircleShape, color = accent.copy(alpha = 0.1f)) {
+                    if (tempPhotoUri != null) {
+                        AsyncImage(
+                            model = tempPhotoUri,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize().clip(CircleShape),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        )
+                    } else {
+                        Icon(Icons.Rounded.Person, null, modifier = Modifier.size(72.dp), tint = accent)
+                    }
+                }
+                Surface(
+                    modifier = Modifier.size(36.dp),
+                    shape = CircleShape,
+                    color = accent,
+                    border = BorderStroke(2.dp, LocalBgColor.current),
+                    onClick = { photoPickerLauncher.launch("image/*") }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.CameraAlt, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            ProfileInputField("Full Name", tempName) { tempName = it }
+            ProfileInputField("Bio / Status", tempBio) { tempBio = it }
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f).height(56.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, LocalSurfaceColor.current)
+                ) {
+                    Text("Cancel", color = LocalTextPrimary.current)
+                }
+                Button(
+                    onClick = { onSave(tempName, tempBio, tempPhotoUri) },
+                    modifier = Modifier.weight(1f).height(56.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = LocalAccentColor.current)
+                ) {
+                    Text("Save", color = Color.White)
+                }
+            }
         }
     }
 }
