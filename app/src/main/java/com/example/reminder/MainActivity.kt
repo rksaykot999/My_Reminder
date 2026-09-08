@@ -17,7 +17,9 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -193,6 +195,18 @@ class DataManager(context: Context) {
     fun isNotificationEnabled(key: String, default: Boolean = true): Boolean {
         return prefs.getBoolean(key, default)
     }
+
+    fun setGuestMode(enabled: Boolean) {
+        prefs.edit { putBoolean("is_guest_mode", enabled) }
+    }
+
+    fun isGuestMode(): Boolean = prefs.getBoolean("is_guest_mode", false)
+
+    fun saveLastSyncTimestamp(timestamp: Long = System.currentTimeMillis()) {
+        prefs.edit { putLong("last_sync_timestamp", timestamp) }
+    }
+
+    fun getLastSyncTimestamp(): Long = prefs.getLong("last_sync_timestamp", 0L)
 }
 
 private fun Color.toArgb(): Int {
@@ -253,17 +267,28 @@ class MainActivity : ComponentActivity() {
             val channels = listOf(
                 NotificationChannel(
                     "TASK_COMPLETED",
-                    "Completions",
-                    NotificationManager.IMPORTANCE_HIGH
+                    "Task Completions",
+                    NotificationManager.IMPORTANCE_LOW
                 ).apply {
-                    description = "Channel for task completion alerts"
+                    description = "Silent notification channel for completed tasks"
+                    setSound(null, null)
+                },
+                NotificationChannel(
+                    "TASK_REMINDER_SILENT",
+                    "Upcoming Task Warnings",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Silent countdown notification 2 minutes before task time"
+                    setSound(null, null)
                 },
                 NotificationChannel(
                     "TASK_REMINDER",
-                    "Reminders",
+                    "Task Reminders",
                     NotificationManager.IMPORTANCE_HIGH
                 ).apply {
-                    description = "Channel for scheduled task reminders"
+                    description = "Channel for scheduled task reminders with sound"
+                    enableLights(true)
+                    enableVibration(true)
                 },
                 NotificationChannel(
                     "PRODUCTIVITY_CHANNEL",
@@ -271,6 +296,7 @@ class MainActivity : ComponentActivity() {
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
                     description = "Channel for timers and stopwatch"
+                    setSound(null, null)
                 }
             )
 
@@ -286,19 +312,61 @@ class ReminderReceiver : BroadcastReceiver() {
         if (!dataManager.isNotificationEnabled("reminders_enabled")) return
 
         val action = intent.action
+        val id = intent.getIntExtra("id", 0)
+        val title = intent.getStringExtra("title") ?: "Reminder"
+        val desc = intent.getStringExtra("desc") ?: "You have a task scheduled."
+        val scheduledTimestamp = intent.getLongExtra("scheduledTimestamp", 0L)
+
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
         if (action == "ACTION_DONE") {
-            val id = intent.getIntExtra("id", -1)
             if (id != -1) {
                 markReminderAsDone(context, id)
-                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 notificationManager.cancel(id)
+                notificationManager.cancel(id + 5000)
             }
             return
         }
 
-        val id = intent.getIntExtra("id", 0)
-        val title = intent.getStringExtra("title") ?: "Reminder"
-        val desc = intent.getStringExtra("desc") ?: "You have a task to do!"
+        if (action == "ACTION_PRE_ALARM") {
+            // 2 minutes before time: Silent notification with live countdown!
+            val doneIntent = Intent(context, ReminderReceiver::class.java).apply {
+                this.action = "ACTION_DONE"
+                putExtra("id", id)
+            }
+            val donePendingIntent = PendingIntent.getBroadcast(
+                context,
+                id + 1000,
+                doneIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val builder = NotificationCompat.Builder(context, "TASK_REMINDER_SILENT")
+                .setSmallIcon(R.drawable.ic_notification_clock)
+                .setContentTitle("Upcoming Task in 2 mins")
+                .setContentText(title)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setSound(null)
+                .setUsesChronometer(true)
+                .setChronometerCountDown(true)
+                .setWhen(if (scheduledTimestamp > 0) scheduledTimestamp else System.currentTimeMillis() + 120000)
+                .setAutoCancel(true)
+                .addAction(android.R.drawable.checkbox_on_background, "Mark Done", donePendingIntent)
+
+            with(NotificationManagerCompat.from(context)) {
+                if (Build.VERSION.SDK_INT < 33 || ActivityCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    notify(id + 5000, builder.build())
+                }
+            }
+            return
+        }
+
+        // Exact Alarm Time: Sound notification!
+        notificationManager.cancel(id + 5000) // Cancel silent pre-alarm
 
         val doneIntent = Intent(context, ReminderReceiver::class.java).apply {
             this.action = "ACTION_DONE"
@@ -313,11 +381,12 @@ class ReminderReceiver : BroadcastReceiver() {
 
         val builder = NotificationCompat.Builder(context, "TASK_REMINDER")
             .setSmallIcon(R.drawable.ic_notification_clock)
-            .setContentTitle(title)
-            .setContentText(desc)
+            .setContentTitle("Reminder: $title")
+            .setContentText(if (desc.isNotBlank()) desc else "Time for your scheduled task!")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
-            .addAction(android.R.drawable.checkbox_on_background, "Done", donePendingIntent)
+            .addAction(android.R.drawable.checkbox_on_background, "Mark Done", donePendingIntent)
 
         with(NotificationManagerCompat.from(context)) {
             if (Build.VERSION.SDK_INT < 33 || ActivityCompat.checkSelfPermission(
@@ -338,8 +407,6 @@ fun markReminderAsDone(context: Context, id: Int) {
     if (index != -1) {
         reminders[index] = reminders[index].copy(isCompleted = true)
         dataManager.saveReminders(reminders)
-        // Refresh UI if app is open? This is harder without a shared viewmodel/repo
-        // but it updates the storage.
     }
 }
 
@@ -349,7 +416,8 @@ fun showCompletionNotification(context: Context, taskTitle: String) {
         .setSmallIcon(R.drawable.ic_notification_clock)
         .setContentTitle("Task Finished!")
         .setContentText("You completed: $taskTitle")
-        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setPriority(NotificationCompat.PRIORITY_LOW)
+        .setSound(null)
         .setAutoCancel(true)
 
     with(NotificationManagerCompat.from(context)) {
@@ -367,16 +435,20 @@ fun scheduleReminder(context: Context, reminder: Reminder) {
     if (reminder.scheduledTimestamp <= System.currentTimeMillis()) return
 
     val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val intent = Intent(context, ReminderReceiver::class.java).apply {
+
+    // 1. Exact Alarm at scheduled time (WITH SOUND)
+    val exactIntent = Intent(context, ReminderReceiver::class.java).apply {
+        action = "ACTION_EXACT_ALARM"
         putExtra("id", reminder.id)
         putExtra("title", reminder.title)
         putExtra("desc", reminder.description)
+        putExtra("scheduledTimestamp", reminder.scheduledTimestamp)
     }
 
-    val pendingIntent = PendingIntent.getBroadcast(
+    val exactPendingIntent = PendingIntent.getBroadcast(
         context,
         reminder.id,
-        intent,
+        exactIntent,
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
@@ -385,17 +457,39 @@ fun scheduleReminder(context: Context, reminder: Reminder) {
             alarmManager.setExactAndAllowWhileIdle(
                 AlarmManager.RTC_WAKEUP,
                 reminder.scheduledTimestamp,
-                pendingIntent
+                exactPendingIntent
             )
         } else {
-            alarmManager.set(AlarmManager.RTC_WAKEUP, reminder.scheduledTimestamp, pendingIntent)
+            alarmManager.set(AlarmManager.RTC_WAKEUP, reminder.scheduledTimestamp, exactPendingIntent)
         }
     } else {
         alarmManager.setExactAndAllowWhileIdle(
             AlarmManager.RTC_WAKEUP,
             reminder.scheduledTimestamp,
-            pendingIntent
+            exactPendingIntent
         )
+    }
+
+    // 2. Pre-Alarm 2 minutes before (SILENT WITH LIVE COUNTDOWN)
+    val twoMinsMillis = 2 * 60 * 1000L
+    val preAlarmTimestamp = reminder.scheduledTimestamp - twoMinsMillis
+    if (preAlarmTimestamp > System.currentTimeMillis()) {
+        val preIntent = Intent(context, ReminderReceiver::class.java).apply {
+            action = "ACTION_PRE_ALARM"
+            putExtra("id", reminder.id)
+            putExtra("title", reminder.title)
+            putExtra("desc", reminder.description)
+            putExtra("scheduledTimestamp", reminder.scheduledTimestamp)
+        }
+
+        val prePendingIntent = PendingIntent.getBroadcast(
+            context,
+            reminder.id + 5000,
+            preIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        alarmManager.set(AlarmManager.RTC_WAKEUP, preAlarmTimestamp, prePendingIntent)
     }
 }
 
@@ -403,7 +497,15 @@ fun scheduleReminder(context: Context, reminder: Reminder) {
 fun MainContainer() {
     val context = LocalContext.current
     val dataManager = remember { DataManager(context) }
+    val firebaseSyncManager = remember { FirebaseSyncManager(context) }
+
     var selectedItem by rememberSaveable { mutableStateOf(NavItem.HOME) }
+    var showAuthDialog by remember { mutableStateOf(false) }
+
+    var isGuestMode by remember { mutableStateOf(dataManager.isGuestMode()) }
+    var userHasChosenAuthMode by remember {
+        mutableStateOf(firebaseSyncManager.isLoggedIn || isGuestMode)
+    }
 
     // --- APP STATE ---
     val reminders = remember {
@@ -417,6 +519,77 @@ fun MainContainer() {
     var userName by rememberSaveable { mutableStateOf(initialName) }
     var userBio by rememberSaveable { mutableStateOf(initialBio) }
     var userPhotoUri by rememberSaveable { mutableStateOf(initialPhoto) }
+
+    // Cloud sync handler
+    val performCloudSync = {
+        if (firebaseSyncManager.isLoggedIn) {
+            firebaseSyncManager.syncRemindersToCloud(reminders)
+            firebaseSyncManager.syncNotesToCloud(notes)
+            firebaseSyncManager.fetchRemindersFromCloud { cloudReminders ->
+                if (cloudReminders.isNotEmpty()) {
+                    cloudReminders.forEach { cloudRem ->
+                        val index = reminders.indexOfFirst { it.id == cloudRem.id }
+                        if (index != -1) {
+                            reminders[index] = cloudRem
+                        } else {
+                            reminders.add(cloudRem)
+                        }
+                    }
+                    dataManager.saveReminders(reminders)
+                }
+            }
+            firebaseSyncManager.fetchNotesFromCloud { cloudNotes ->
+                if (cloudNotes.isNotEmpty()) {
+                    cloudNotes.forEach { cloudNote ->
+                        val index = notes.indexOfFirst { it.id == cloudNote.id }
+                        if (index != -1) {
+                            notes[index] = cloudNote
+                        } else {
+                            notes.add(cloudNote)
+                        }
+                    }
+                    dataManager.saveNotes(notes)
+                }
+            }
+        }
+    }
+
+    val handleLogoutToGuest = {
+        firebaseSyncManager.signOut()
+        dataManager.setGuestMode(true)
+        dataManager.saveProfile("User Name", "Set your status", null)
+        userName = "User Name"
+        userBio = "Set your status"
+        userPhotoUri = null
+        isGuestMode = true
+        userHasChosenAuthMode = true
+        Toast.makeText(context, "Logged out. Switched to Guest Mode.", Toast.LENGTH_SHORT).show()
+    }
+
+    LaunchedEffect(Unit) {
+        val lastSync = dataManager.getLastSyncTimestamp()
+        val oneDayMillis = 24 * 60 * 60 * 1000L
+        if (firebaseSyncManager.isLoggedIn && (System.currentTimeMillis() - lastSync > oneDayMillis)) {
+            performCloudSync()
+        }
+    }
+
+    LaunchedEffect(firebaseSyncManager.currentUser) {
+        val user = firebaseSyncManager.currentUser
+        if (user != null) {
+            val nameFromAuth = user.displayName?.takeIf { it.isNotBlank() }
+                ?: user.email?.substringBefore("@")
+                ?: userName
+            val photoFromAuth = user.photoUrl?.toString()
+
+            userName = nameFromAuth
+            if (!photoFromAuth.isNullOrEmpty()) {
+                userPhotoUri = photoFromAuth
+            }
+            dataManager.saveProfile(userName, userBio, userPhotoUri)
+        }
+        performCloudSync()
+    }
 
     // --- THEME & APPEARANCE STATE ---
     var appTheme by remember { mutableIntStateOf(dataManager.loadTheme()) }
@@ -439,12 +612,50 @@ fun MainContainer() {
     var isAddingNote by remember { mutableStateOf(false) }
     var noteToEdit by remember { mutableStateOf<Note?>(null) }
 
-    // Save data when lists change
+    // Save data when lists change & Sync with Firebase
     LaunchedEffect(reminders.size, reminders.count { it.isCompleted }) {
         dataManager.saveReminders(reminders)
+        if (firebaseSyncManager.isLoggedIn) {
+            firebaseSyncManager.syncRemindersToCloud(reminders)
+        }
     }
     LaunchedEffect(notes.size) {
         dataManager.saveNotes(notes)
+        if (firebaseSyncManager.isLoggedIn) {
+            firebaseSyncManager.syncNotesToCloud(notes)
+        }
+    }
+
+    // Back press & Double-tap to exit handling
+    val activity = context as? ComponentActivity
+    var backPressedTime by remember { mutableLongStateOf(0L) }
+
+    BackHandler {
+        when {
+            isAddingReminder || reminderToEdit != null -> {
+                isAddingReminder = false
+                reminderToEdit = null
+            }
+            isAddingNote || noteToEdit != null -> {
+                isAddingNote = false
+                noteToEdit = null
+            }
+            showAuthDialog -> {
+                showAuthDialog = false
+            }
+            selectedItem != NavItem.HOME -> {
+                selectedItem = NavItem.HOME
+            }
+            else -> {
+                val currentTime = System.currentTimeMillis()
+                if (currentTime - backPressedTime < 2000) {
+                    activity?.finish()
+                } else {
+                    backPressedTime = currentTime
+                    Toast.makeText(context, "Press back again to exit", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 
     CompositionLocalProvider(
@@ -461,142 +672,196 @@ fun MainContainer() {
                     .fillMaxSize()
                     .background(LocalBgColor.current)
             ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            AnimatedContent(
-                targetState = selectedItem,
-                transitionSpec = {
-                    fadeIn(tween(500)) + scaleIn(initialScale = 0.92f) togetherWith fadeOut(
-                        tween(500)
+                if (!userHasChosenAuthMode && !firebaseSyncManager.isLoggedIn) {
+                    FullScreenAuthScreen(
+                        firebaseSyncManager = firebaseSyncManager,
+                        onAuthSuccess = {
+                            dataManager.setGuestMode(false)
+                            isGuestMode = false
+                            userHasChosenAuthMode = true
+                            performCloudSync()
+                        },
+                        onContinueGuest = {
+                            dataManager.setGuestMode(true)
+                            isGuestMode = true
+                            userHasChosenAuthMode = true
+                        }
                     )
-                },
-                label = "NavigationTransition"
-            ) { destination ->
-                when (destination) {
-                    NavItem.HOME -> GeneralHome(
-                        reminders = reminders,
-                        onAddReminder = { isAddingReminder = true },
-                        onToggleReminder = { id ->
-                            val index = reminders.indexOfFirst { it.id == id }
-                            if (index != -1) {
-                                val wasCompleted = reminders[index].isCompleted
-                                reminders[index] = reminders[index].copy(isCompleted = !wasCompleted)
-                                if (!wasCompleted) showCompletionNotification(
-                                    context,
-                                    reminders[index].title
+                } else {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        AnimatedContent(
+                            targetState = selectedItem,
+                            transitionSpec = {
+                                fadeIn(tween(500)) + scaleIn(initialScale = 0.92f) togetherWith fadeOut(
+                                    tween(500)
                                 )
-                                dataManager.saveReminders(reminders)
+                            },
+                            label = "NavigationTransition"
+                        ) { destination ->
+                            when (destination) {
+                                NavItem.HOME -> GeneralHome(
+                                    reminders = reminders,
+                                    userName = userName,
+                                    firebaseSyncManager = firebaseSyncManager,
+                                    onOpenAuth = { showAuthDialog = true },
+                                    onSyncCloud = { performCloudSync() },
+                                    onNavigateToProfile = { selectedItem = NavItem.ME },
+                                    onAddReminder = { isAddingReminder = true },
+                                    onToggleReminder = { id ->
+                                        val index = reminders.indexOfFirst { it.id == id }
+                                        if (index != -1) {
+                                            val wasCompleted = reminders[index].isCompleted
+                                            reminders[index] = reminders[index].copy(isCompleted = !wasCompleted)
+                                            if (!wasCompleted) showCompletionNotification(
+                                                context,
+                                                reminders[index].title
+                                            )
+                                            dataManager.saveReminders(reminders)
+                                            if (firebaseSyncManager.isLoggedIn) {
+                                                firebaseSyncManager.syncRemindersToCloud(reminders)
+                                            }
+                                        }
+                                    },
+                                    onEditReminder = { reminder -> reminderToEdit = reminder },
+                                    onDeleteReminder = { id ->
+                                        reminders.removeIf { it.id == id }
+                                        dataManager.saveReminders(reminders)
+                                        if (firebaseSyncManager.isLoggedIn) {
+                                            firebaseSyncManager.deleteReminderFromCloud(id)
+                                            firebaseSyncManager.syncRemindersToCloud(reminders)
+                                        }
+                                    }
+                                )
+                                NavItem.CALENDAR -> UniversalCalendar(
+                                    reminders = reminders,
+                                    onQuickAdd = { dateStr, title ->
+                                        val newRem = Reminder(
+                                            id = (reminders.maxOfOrNull { it.id } ?: 0) + 1,
+                                            title = title,
+                                            time = "09:00 AM",
+                                            date = dateStr,
+                                            scheduledTimestamp = System.currentTimeMillis() + 3600000
+                                        )
+                                        reminders.add(newRem)
+                                        dataManager.saveReminders(reminders)
+                                        if (firebaseSyncManager.isLoggedIn) {
+                                            firebaseSyncManager.syncRemindersToCloud(reminders)
+                                        }
+                                    }
+                                )
+                                NavItem.NOTES -> GeneralNotes(
+                                    notes = notes,
+                                    onAddNote = { isAddingNote = true },
+                                    onEditNote = { note -> noteToEdit = note },
+                                    onDeleteNote = { id ->
+                                        notes.removeIf { it.id == id }
+                                        dataManager.saveNotes(notes)
+                                        if (firebaseSyncManager.isLoggedIn) {
+                                            firebaseSyncManager.deleteNoteFromCloud(id)
+                                            firebaseSyncManager.syncNotesToCloud(notes)
+                                        }
+                                    }
+                                )
+                                NavItem.FOCUS -> ProductivityTools()
+                                NavItem.ME -> UniversalProfile(
+                                    name = userName,
+                                    bio = userBio,
+                                    photoUri = userPhotoUri,
+                                    currentTheme = appTheme,
+                                    currentAccent = currentAccentColor,
+                                    firebaseSyncManager = firebaseSyncManager,
+                                    onOpenAuth = { showAuthDialog = true },
+                                    onSyncCloud = { performCloudSync() },
+                                    onLogoutToGuest = handleLogoutToGuest,
+                                    onUpdateProfile = { n, b, p ->
+                                        userName = n
+                                        userBio = b
+                                        userPhotoUri = p
+                                        dataManager.saveProfile(n, b, p)
+                                    },
+                                    onUpdateAppearance = { theme, accent ->
+                                        appTheme = theme
+                                        accentColorInt = accent.toArgb()
+                                        dataManager.saveTheme(theme)
+                                        dataManager.saveAccent(accent.toArgb())
+                                    }
+                                )
                             }
-                        },
-                        onEditReminder = { reminder -> reminderToEdit = reminder },
-                        onDeleteReminder = { id ->
-                            reminders.removeIf { it.id == id }
-                            dataManager.saveReminders(reminders)
                         }
-                    )
-                    NavItem.CALENDAR -> UniversalCalendar(
-                        reminders = reminders,
-                        onQuickAdd = { dateStr, title ->
-                            val newRem = Reminder(
-                                id = (reminders.maxOfOrNull { it.id } ?: 0) + 1,
-                                title = title,
-                                time = "09:00 AM",
-                                date = dateStr,
-                                scheduledTimestamp = System.currentTimeMillis() + 3600000
-                            )
-                            reminders.add(newRem)
-                            dataManager.saveReminders(reminders)
-                        }
-                    )
-                    NavItem.NOTES -> GeneralNotes(
-                        notes = notes,
-                        onAddNote = { isAddingNote = true },
-                        onEditNote = { note -> noteToEdit = note },
-                        onDeleteNote = { id ->
-                            notes.removeIf { it.id == id }
-                            dataManager.saveNotes(notes)
-                        }
-                    )
-                    NavItem.FOCUS -> ProductivityTools()
-                    NavItem.ME -> UniversalProfile(
-                        name = userName,
-                        bio = userBio,
-                        photoUri = userPhotoUri,
-                        currentTheme = appTheme,
-                        currentAccent = currentAccentColor,
-                        onUpdateProfile = { n, b, p ->
-                            userName = n
-                            userBio = b
-                            userPhotoUri = p
-                            dataManager.saveProfile(n, b, p)
-                        },
-                        onUpdateAppearance = { theme, accent ->
-                            appTheme = theme
-                            accentColorInt = accent.toArgb()
-                            dataManager.saveTheme(theme)
-                            dataManager.saveAccent(accent.toArgb())
-                        }
-                    )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 28.dp)
+                    ) {
+                        UniversalDock(selectedItem = selectedItem, onItemSelected = { selectedItem = it })
+                    }
+
+                    if (showAuthDialog) {
+                        AuthDialog(
+                            firebaseSyncManager = firebaseSyncManager,
+                            onDismiss = { showAuthDialog = false },
+                            onAuthSuccess = {
+                                showAuthDialog = false
+                                performCloudSync()
+                            }
+                        )
+                    }
+
+                    AnimatedVisibility(
+                        visible = isAddingReminder || reminderToEdit != null,
+                        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+                    ) {
+                        NewReminderScreen(
+                            initialReminder = reminderToEdit,
+                            onDismiss = { isAddingReminder = false; reminderToEdit = null },
+                            onSave = { reminder ->
+                                if (reminderToEdit != null) {
+                                    val index = reminders.indexOfFirst { it.id == reminderToEdit!!.id }
+                                    if (index != -1) reminders[index] = reminder.copy(id = reminderToEdit!!.id)
+                                    scheduleReminder(context, reminders[index])
+                                    reminderToEdit = null
+                                } else {
+                                    val newReminder = reminder.copy(id = (reminders.maxOfOrNull { it.id } ?: 0) + 1)
+                                    reminders.add(newReminder)
+                                    scheduleReminder(context, newReminder)
+                                    isAddingReminder = false
+                                }
+                                dataManager.saveReminders(reminders)
+                                if (firebaseSyncManager.isLoggedIn) {
+                                    firebaseSyncManager.syncRemindersToCloud(reminders)
+                                }
+                            }
+                        )
+                    }
+
+                    if (isAddingNote || noteToEdit != null) {
+                        NewNoteDialog(
+                            initialNote = noteToEdit,
+                            onDismiss = { isAddingNote = false; noteToEdit = null },
+                            onSave = { title, content ->
+                                if (noteToEdit != null) {
+                                    val index = notes.indexOfFirst { it.id == noteToEdit!!.id }
+                                    if (index != -1) {
+                                        notes[index] = noteToEdit!!.copy(title = title, content = content)
+                                    }
+                                    noteToEdit = null
+                                } else {
+                                    val dateStr =
+                                        SimpleDateFormat("MMM dd", Locale.getDefault()).format(Calendar.getInstance().time)
+                                    notes.add(Note((notes.maxOfOrNull { it.id } ?: 0) + 1, title, content, dateStr))
+                                    isAddingNote = false
+                                }
+                                dataManager.saveNotes(notes)
+                            }
+                        )
+                    }
                 }
             }
         }
-
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 28.dp)
-        ) {
-            UniversalDock(selectedItem = selectedItem, onItemSelected = { selectedItem = it })
-        }
-
-        AnimatedVisibility(
-            visible = isAddingReminder || reminderToEdit != null,
-            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-        ) {
-            NewReminderScreen(
-                initialReminder = reminderToEdit,
-                onDismiss = { isAddingReminder = false; reminderToEdit = null },
-                onSave = { reminder ->
-                    if (reminderToEdit != null) {
-                        val index = reminders.indexOfFirst { it.id == reminderToEdit!!.id }
-                        if (index != -1) reminders[index] = reminder.copy(id = reminderToEdit!!.id)
-                        scheduleReminder(context, reminders[index])
-                        reminderToEdit = null
-                    } else {
-                        val newReminder = reminder.copy(id = (reminders.maxOfOrNull { it.id } ?: 0) + 1)
-                        reminders.add(newReminder)
-                        scheduleReminder(context, newReminder)
-                        isAddingReminder = false
-                    }
-                    dataManager.saveReminders(reminders)
-                }
-            )
-        }
-
-        if (isAddingNote || noteToEdit != null) {
-            NewNoteDialog(
-                initialNote = noteToEdit,
-                onDismiss = { isAddingNote = false; noteToEdit = null },
-                onSave = { title, content ->
-                    if (noteToEdit != null) {
-                        val index = notes.indexOfFirst { it.id == noteToEdit!!.id }
-                        if (index != -1) {
-                            notes[index] = noteToEdit!!.copy(title = title, content = content)
-                        }
-                        noteToEdit = null
-                    } else {
-                        val dateStr =
-                            SimpleDateFormat("MMM dd", Locale.getDefault()).format(Calendar.getInstance().time)
-                        notes.add(Note((notes.maxOfOrNull { it.id } ?: 0) + 1, title, content, dateStr))
-                        isAddingNote = false
-                    }
-                    dataManager.saveNotes(notes)
-                }
-            )
-        }
     }
-}
-}
 }
 
 enum class NavItem(val icon: ImageVector) {
@@ -650,26 +915,44 @@ fun UniversalDock(selectedItem: NavItem, onItemSelected: (NavItem) -> Unit) {
 @Composable
 fun GeneralHome(
     reminders: List<Reminder>,
+    userName: String,
+    firebaseSyncManager: FirebaseSyncManager,
+    onOpenAuth: () -> Unit,
+    onSyncCloud: () -> Unit,
+    onNavigateToProfile: () -> Unit,
     onAddReminder: () -> Unit,
     onToggleReminder: (Int) -> Unit,
     onEditReminder: (Reminder) -> Unit,
     onDeleteReminder: (Int) -> Unit
 ) {
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedPriorityFilter by remember { mutableStateOf("ALL") }
+
+    val filteredReminders = reminders.filter { rem ->
+        val matchesSearch = searchQuery.isBlank() ||
+                rem.title.contains(searchQuery, ignoreCase = true) ||
+                rem.description.contains(searchQuery, ignoreCase = true)
+        val matchesPriority = selectedPriorityFilter == "ALL" || rem.priority.equals(selectedPriorityFilter, ignoreCase = true)
+        matchesSearch && matchesPriority
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(24.dp)
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             item { Spacer(modifier = Modifier.height(72.dp)) }
+
+            // Welcome Header
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             "WELCOME BACK",
                             color = LocalAccentColor.current,
@@ -678,10 +961,12 @@ fun GeneralHome(
                             fontSize = 12.sp
                         )
                         Text(
-                            "Make it count.",
+                            text = if (firebaseSyncManager.isLoggedIn && userName.isNotBlank()) "Hi, $userName" else "My Reminder",
                             color = LocalTextPrimary.current,
                             style = MaterialTheme.typography.displaySmall,
-                            fontWeight = FontWeight.ExtraBold
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     Icon(
@@ -692,6 +977,65 @@ fun GeneralHome(
                     )
                 }
             }
+
+            // Firebase Account Banner
+            item {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { onNavigateToProfile() },
+                    color = LocalSurfaceColor.current,
+                    border = BorderStroke(1.dp, LocalAccentColor.current.copy(alpha = 0.25f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(LocalAccentColor.current.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (firebaseSyncManager.isLoggedIn) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
+                                    contentDescription = "Sync",
+                                    tint = LocalAccentColor.current,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = if (firebaseSyncManager.isLoggedIn) "Firebase Cloud Connected" else "Guest Mode (Local Only)",
+                                    color = LocalTextPrimary.current,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = firebaseSyncManager.currentUser?.email ?: "Tap to sign in or sync with cloud",
+                                    color = LocalTextSecondary.current,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.ArrowForwardIos,
+                            contentDescription = "Go",
+                            tint = LocalTextSecondary.current,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+
+            // Progress Banner
             item {
                 val completed = reminders.count { it.isCompleted }
                 val total = reminders.size
@@ -699,7 +1043,7 @@ fun GeneralHome(
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(160.dp),
+                        .height(150.dp),
                     shape = RoundedCornerShape(28.dp),
                     color = LocalAccentColor.current
                 ) {
@@ -730,6 +1074,8 @@ fun GeneralHome(
                     }
                 }
             }
+
+            // Stats row
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     HomeStatCard(
@@ -740,32 +1086,129 @@ fun GeneralHome(
                         Modifier.weight(1f)
                     )
                     HomeStatCard(
-                        "Focus",
-                        "2.5h",
-                        Icons.Rounded.Bolt,
+                        "Completed",
+                        "${reminders.count { it.isCompleted }}",
+                        Icons.Rounded.CheckCircle,
                         SuccessEmerald,
                         Modifier.weight(1f)
                     )
                 }
             }
+
+            // Search Bar
             item {
-                Text(
-                    "Upcoming Today",
-                    color = LocalTextPrimary.current,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search reminders...", color = LocalTextSecondary.current.copy(alpha = 0.6f)) },
+                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = "Search", tint = LocalAccentColor.current) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Rounded.Clear, contentDescription = "Clear", tint = LocalTextSecondary.current)
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = LocalAccentColor.current,
+                        unfocusedBorderColor = LocalSurfaceColor.current,
+                        focusedContainerColor = LocalSurfaceColor.current,
+                        unfocusedContainerColor = LocalSurfaceColor.current
+                    )
                 )
             }
-            items(reminders, key = { it.id }) { reminder ->
-                TaskRow(
-                    reminder = reminder,
-                    onToggle = { onToggleReminder(reminder.id) },
-                    onEdit = { onEditReminder(reminder) },
-                    onDelete = { onDeleteReminder(reminder.id) }
-                )
+
+            // Priority Filter Chips
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "PRIORITY FILTER",
+                        color = LocalTextSecondary.current,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        letterSpacing = 1.sp
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("ALL" to LocalAccentColor.current, "HIGH" to DangerRose, "MEDIUM" to WarningAmber, "LOW" to SuccessEmerald)
+                            .forEach { (priority, color) ->
+                                val isSelected = selectedPriorityFilter == priority
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { selectedPriorityFilter = priority },
+                                    label = { Text(priority, fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = color,
+                                        selectedLabelColor = Color.White,
+                                        containerColor = LocalSurfaceColor.current,
+                                        labelColor = LocalTextPrimary.current
+                                    ),
+                                    border = null
+                                )
+                            }
+                    }
+                }
             }
+
+            // Header
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Upcoming Today",
+                        color = LocalTextPrimary.current,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 20.sp
+                    )
+                    Text(
+                        "${filteredReminders.size} tasks",
+                        color = LocalTextSecondary.current,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            if (filteredReminders.isEmpty()) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.EventNote,
+                            contentDescription = "Empty",
+                            tint = LocalTextSecondary.current.copy(alpha = 0.5f),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = if (searchQuery.isNotBlank() || selectedPriorityFilter != "ALL") "No matching reminders found" else "No reminders yet! Tap + to add one",
+                            color = LocalTextSecondary.current,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            } else {
+                items(filteredReminders, key = { it.id }) { reminder ->
+                    TaskRow(
+                        reminder = reminder,
+                        onToggle = { onToggleReminder(reminder.id) },
+                        onEdit = { onEditReminder(reminder) },
+                        onDelete = { onDeleteReminder(reminder.id) }
+                    )
+                }
+            }
+
             item { Spacer(modifier = Modifier.height(110.dp)) }
         }
+
         FloatingActionButton(
             onClick = onAddReminder,
             modifier = Modifier
@@ -803,6 +1246,12 @@ fun HomeStatCard(label: String, value: String, icon: ImageVector, color: Color, 
 @Composable
 fun TaskRow(reminder: Reminder, onToggle: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
     var showMenu by remember { mutableStateOf(false) }
+    val priorityColor = when (reminder.priority.uppercase()) {
+        "HIGH" -> DangerRose
+        "MEDIUM" -> WarningAmber
+        else -> SuccessEmerald
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -843,11 +1292,51 @@ fun TaskRow(reminder: Reminder, onToggle: () -> Unit, onEdit: () -> Unit, onDele
                         textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough
                     ) else MaterialTheme.typography.bodyMedium
                 )
-                Text(
-                    "${reminder.date} • ${reminder.time} • ${reminder.category.label}",
-                    color = LocalTextSecondary.current,
-                    fontSize = 12.sp
-                )
+                if (reminder.description.isNotBlank()) {
+                    Text(
+                        text = reminder.description,
+                        color = LocalTextSecondary.current,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "${reminder.date} • ${reminder.time}",
+                        color = LocalTextSecondary.current,
+                        fontSize = 11.sp
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = reminder.category.color.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = reminder.category.label,
+                            color = reminder.category.color,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = priorityColor.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = reminder.priority.uppercase(),
+                            color = priorityColor,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
             }
             Box {
                 IconButton(onClick = { showMenu = true }) {
@@ -2380,11 +2869,25 @@ fun UniversalProfile(
     photoUri: String?,
     currentTheme: Int,
     currentAccent: Color,
+    firebaseSyncManager: FirebaseSyncManager,
+    onOpenAuth: () -> Unit,
+    onSyncCloud: () -> Unit,
+    onLogoutToGuest: () -> Unit,
     onUpdateProfile: (String, String, String?) -> Unit,
     onUpdateAppearance: (Int, Color) -> Unit
 ) {
     var currentSubScreen by remember { mutableStateOf<ProfileSubScreen?>(null) }
     var isEditingProfile by remember { mutableStateOf(false) }
+
+    if (currentSubScreen != null || isEditingProfile) {
+        BackHandler {
+            if (isEditingProfile) {
+                isEditingProfile = false
+            } else {
+                currentSubScreen = null
+            }
+        }
+    }
 
     AnimatedContent(
         targetState = currentSubScreen,
@@ -2402,6 +2905,10 @@ fun UniversalProfile(
                 name = name,
                 bio = bio,
                 photoUri = photoUri,
+                firebaseSyncManager = firebaseSyncManager,
+                onOpenAuth = onOpenAuth,
+                onSyncCloud = onSyncCloud,
+                onLogoutToGuest = onLogoutToGuest,
                 onEditProfile = { isEditingProfile = true },
                 onNavigate = { currentSubScreen = it }
             )
@@ -2421,7 +2928,14 @@ fun UniversalProfile(
                     onUpdate = onUpdateAppearance
                 )
                 ProfileSubScreen.TERMS -> TermsPrivacyScreen(onBack = { currentSubScreen = null })
-                ProfileSubScreen.HELP -> HelpSupportScreen(onBack = { currentSubScreen = null })
+                ProfileSubScreen.MANAGE_ACCOUNT -> ManageAccountScreen(
+                    firebaseSyncManager = firebaseSyncManager,
+                    onBack = { currentSubScreen = null },
+                    onLogoutToGuest = {
+                        currentSubScreen = null
+                        onLogoutToGuest()
+                    }
+                )
             }
         }
     }
@@ -2441,7 +2955,7 @@ fun UniversalProfile(
 }
 
 enum class ProfileSubScreen {
-    PERSONAL, NOTIFICATIONS, APPEARANCE, TERMS, HELP
+    PERSONAL, NOTIFICATIONS, APPEARANCE, TERMS, MANAGE_ACCOUNT
 }
 
 @Composable
@@ -2449,6 +2963,10 @@ fun ProfileMain(
     name: String,
     bio: String,
     photoUri: String?,
+    firebaseSyncManager: FirebaseSyncManager,
+    onOpenAuth: () -> Unit,
+    onSyncCloud: () -> Unit,
+    onLogoutToGuest: () -> Unit,
     onEditProfile: () -> Unit,
     onNavigate: (ProfileSubScreen) -> Unit
 ) {
@@ -2520,7 +3038,88 @@ fun ProfileMain(
                 }
             }
         }
-        item { Spacer(modifier = Modifier.height(32.dp)) }
+        item { Spacer(modifier = Modifier.height(24.dp)) }
+        item {
+            SectionHeader("FIREBASE & CLOUD SYNC")
+        }
+        item {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp)),
+                color = LocalSurfaceColor.current,
+                border = BorderStroke(1.dp, LocalAccentColor.current.copy(alpha = 0.3f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.Cloud,
+                                contentDescription = "Cloud",
+                                tint = LocalAccentColor.current,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = if (firebaseSyncManager.isLoggedIn) "Cloud Sync Active" else "Guest Mode (Local Only)",
+                                    color = LocalTextPrimary.current,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = firebaseSyncManager.currentUser?.email ?: "Sign in to back up data to the cloud",
+                                    color = LocalTextSecondary.current,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (firebaseSyncManager.isLoggedIn) {
+                            Button(
+                                onClick = onSyncCloud,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = LocalAccentColor.current),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Rounded.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Cloud Sync", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    firebaseSyncManager.signOut()
+                                    onLogoutToGuest()
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = DangerRose)
+                            ) {
+                                Text("Log Out", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        } else {
+                            Button(
+                                onClick = onOpenAuth,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = LocalAccentColor.current),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Sign In / Register", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item { Spacer(modifier = Modifier.height(16.dp)) }
         item {
             SectionHeader("PREFERENCES")
         }
@@ -2532,11 +3131,11 @@ fun ProfileMain(
             SectionHeader("SUPPORT")
         }
         item { ProfileOption("Terms & Privacy", Icons.Rounded.Policy) { onNavigate(ProfileSubScreen.TERMS) } }
-        item { ProfileOption("Help & Support", Icons.Rounded.SupportAgent) { onNavigate(ProfileSubScreen.HELP) } }
+        item { ProfileOption("Manage Account", Icons.Rounded.ManageAccounts) { onNavigate(ProfileSubScreen.MANAGE_ACCOUNT) } }
         item { Spacer(modifier = Modifier.height(24.dp)) }
         item {
             Text(
-                "Version 3.1.0",
+                "Version 1.0.0",
                 color = LocalTextSecondary.current.copy(alpha = 0.5f),
                 fontSize = 11.sp
             )
@@ -2892,44 +3491,207 @@ fun TermsPrivacyScreen(onBack: () -> Unit) {
 }
 
 @Composable
-fun HelpSupportScreen(onBack: () -> Unit) {
-    SubScreenScaffold("Help & Support", onBack) {
+fun ManageAccountScreen(
+    firebaseSyncManager: FirebaseSyncManager,
+    onBack: () -> Unit,
+    onLogoutToGuest: () -> Unit
+) {
+    val context = LocalContext.current
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var isDeleting by remember { mutableStateOf(false) }
+
+    val user = firebaseSyncManager.currentUser
+
+    SubScreenScaffold("Manage Account", onBack) {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item {
-                Text(
-                    "Need assistance? We're here to help you get the most out of Reminder Pro.",
-                    color = LocalTextSecondary.current,
-                    fontSize = 14.sp,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
+                SectionHeader("ACCOUNT INFORMATION")
             }
-            item { ProfileOption("Email Support", Icons.Rounded.Email) { /* action */ } }
-            item { ProfileOption("Frequently Asked Questions", Icons.Rounded.QuestionMark) { /* action */ } }
-            item { ProfileOption("Video Tutorials", Icons.Rounded.PlayCircle) { /* action */ } }
-            item { ProfileOption("User Community", Icons.Rounded.Groups) { /* action */ } }
-            
-            item { Spacer(modifier = Modifier.height(24.dp)) }
-            
-            item {
-                Text("SYSTEM STATUS", color = LocalTextSecondary.current, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-            }
+
             item {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(20.dp),
-                    color = LocalSurfaceColor.current.copy(alpha = 0.4f),
-                    border = BorderStroke(1.dp, Color.White.copy(0.03f))
+                    color = LocalSurfaceColor.current
                 ) {
-                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier
-                            .size(10.dp)
-                            .background(SuccessEmerald, CircleShape))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text("All Systems Operational", color = LocalTextPrimary.current, fontWeight = FontWeight.Medium)
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(LocalAccentColor.current.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.AccountCircle,
+                                    contentDescription = null,
+                                    tint = LocalAccentColor.current,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column {
+                                Text(
+                                    text = user?.displayName?.ifBlank { null } ?: user?.email?.substringBefore("@") ?: "Guest Mode",
+                                    color = LocalTextPrimary.current,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp
+                                )
+                                Text(
+                                    text = user?.email ?: "Not signed in (Local Storage Only)",
+                                    color = LocalTextSecondary.current,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                        if (user != null) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Account ID: ${user.uid}",
+                                color = LocalTextSecondary.current.copy(alpha = 0.6f),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (user != null) {
+                item {
+                    SectionHeader("ACCOUNT ACTIONS")
+                }
+
+                item {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                firebaseSyncManager.signOut()
+                                Toast.makeText(context, "Logged out. Switched to Guest Mode.", Toast.LENGTH_SHORT).show()
+                                onLogoutToGuest()
+                            },
+                        shape = RoundedCornerShape(20.dp),
+                        color = LocalSurfaceColor.current
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(20.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.Logout,
+                                contentDescription = null,
+                                tint = WarningAmber,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column {
+                                Text(
+                                    text = "Deactivate / Sign Out",
+                                    color = LocalTextPrimary.current,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = "Signs out and switches back to Guest Mode.",
+                                    color = LocalTextSecondary.current,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    SectionHeader("DANGER ZONE")
+                }
+
+                item {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showDeleteConfirmDialog = true },
+                        shape = RoundedCornerShape(20.dp),
+                        color = DangerRose.copy(alpha = 0.1f),
+                        border = BorderStroke(1.dp, DangerRose.copy(alpha = 0.3f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(20.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DeleteForever,
+                                contentDescription = null,
+                                tint = DangerRose,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column {
+                                Text(
+                                    text = "Delete Account Permanently",
+                                    color = DangerRose,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = "Permanently deletes your account and cloud data.",
+                                    color = LocalTextSecondary.current,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    if (showDeleteConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!isDeleting) showDeleteConfirmDialog = false },
+            title = { Text("Delete Account?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text("Are you sure you want to delete your account? All your cloud reminders and notes will be permanently erased. This action cannot be undone.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isDeleting = true
+                        firebaseSyncManager.deleteAccount(
+                            onSuccess = {
+                                isDeleting = false
+                                showDeleteConfirmDialog = false
+                                Toast.makeText(context, "Account permanently deleted.", Toast.LENGTH_SHORT).show()
+                                onLogoutToGuest()
+                            },
+                            onError = { err ->
+                                isDeleting = false
+                                Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                            }
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = DangerRose),
+                    enabled = !isDeleting
+                ) {
+                    if (isDeleting) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.White)
+                    } else {
+                        Text("Delete", color = Color.White)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showDeleteConfirmDialog = false },
+                    enabled = !isDeleting
+                ) {
+                    Text("Cancel")
+                }
+            },
+            containerColor = LocalSurfaceColor.current
+        )
     }
 }
 

@@ -8,10 +8,10 @@
             <InsightsFilterSettings>
               <option name="connection">
                 <ConnectionSetting>
-                  <option name="appId" value="PLACEHOLDER" />
-                  <option name="mobileSdkAppId" value="" />
-                  <option name="projectId" value="" />
-                  <option name="projectNumber" value="" />
+                  <option name="appId" value="com.myreminder.app" />
+                  <option name="mobileSdkAppId" value="1:418718369002:android:4e5a20d3d3b756ff4c4393" />
+                  <option name="projectId" value="my-reminder-34564" />
+                  <option name="projectNumber" value="418718369002" />
                 </ConnectionSetting>
               </option>
               <option name="signal" value="SIGNAL_UNSPECIFIED" />
