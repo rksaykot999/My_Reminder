@@ -1490,7 +1490,7 @@ fun NewReminderScreen(
                             shape = RoundedCornerShape(16.dp),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = LocalAccentColor.current,
-                                unfocusedBorderColor = LocalSurfaceColor.current,
+                                unfocusedBorderColor = if (LocalIsDarkTheme.current) LocalSurfaceColor.current else Color.LightGray,
                                 focusedTextColor = LocalTextPrimary.current,
                                 unfocusedTextColor = LocalTextPrimary.current
                             )
@@ -1510,7 +1510,7 @@ fun NewReminderScreen(
                             shape = RoundedCornerShape(16.dp),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = LocalAccentColor.current,
-                                unfocusedBorderColor = LocalSurfaceColor.current,
+                                unfocusedBorderColor = if (LocalIsDarkTheme.current) LocalSurfaceColor.current else Color.LightGray,
                                 focusedTextColor = LocalTextPrimary.current,
                                 unfocusedTextColor = LocalTextPrimary.current
                             )
@@ -1700,7 +1700,7 @@ fun ScheduleCard(
                 )
                 Text(
                     text = value,
-                    color = TextPrimary,
+                    color = LocalTextPrimary.current,
                     fontWeight = FontWeight.ExtraBold,
                     fontSize = 15.sp,
                     maxLines = 1
@@ -3012,7 +3012,7 @@ fun ProfileMain(
                 Spacer(modifier = Modifier.height(20.dp))
                 Text(
                     text = name,
-                    color = TextPrimary,
+                    color = LocalTextPrimary.current,
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -3148,7 +3148,7 @@ fun ProfileMain(
 fun SectionHeader(title: String) {
     Text(
         title,
-        color = TextSecondary,
+        color = LocalTextSecondary.current,
         fontSize = 12.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = 1.sp,
@@ -3267,7 +3267,7 @@ fun PersonalDetailsScreen(name: String, bio: String, onBack: () -> Unit, onSave:
 @Composable
 fun ProfileInputField(label: String, value: String, onValueChange: (String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(label, color = TextSecondary, fontSize = 14.sp)
+        Text(label, color = LocalTextSecondary.current, fontSize = 14.sp)
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
@@ -3275,7 +3275,7 @@ fun ProfileInputField(label: String, value: String, onValueChange: (String) -> U
             shape = RoundedCornerShape(16.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = LocalAccentColor.current,
-                unfocusedBorderColor = LocalSurfaceColor.current,
+                unfocusedBorderColor = if (LocalIsDarkTheme.current) LocalSurfaceColor.current else Color.LightGray,
                 focusedTextColor = LocalTextPrimary.current,
                 unfocusedTextColor = LocalTextPrimary.current
             )
@@ -3475,15 +3475,15 @@ fun TermsPrivacyScreen(onBack: () -> Unit) {
             item {
                 Text(
                     "This application respects your privacy. All your data (Reminders, Notes, Profile) is stored locally on your device and is not shared with any third-party servers.",
-                    color = TextSecondary,
+                    color = LocalTextSecondary.current,
                     lineHeight = 24.sp
                 )
             }
             item {
-                Text("Terms of Service", color = TextPrimary, fontWeight = FontWeight.Bold)
+                Text("Terms of Service", color = LocalTextPrimary.current, fontWeight = FontWeight.Bold)
                 Text(
                     "By using Reminder Pro, you agree to local data management and responsible use of notification features.",
-                    color = TextSecondary
+                    color = LocalTextSecondary.current
                 )
             }
         }
